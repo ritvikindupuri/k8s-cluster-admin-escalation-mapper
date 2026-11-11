@@ -153,7 +153,8 @@ class _Parser:
             if _is_map_start(item_body):
                 key, rest = _split_key(item_body)
                 node: dict[str, Any] = {}
-                self._assign(node, key, rest, indent + 2)
+                key_indent = indent + max(2, stripped.find(item_body, 1))
+                self._assign(node, key, rest, key_indent)
                 # following keys at indent+2 belong to this list map
                 while self.i < len(self.lines):
                     self._skip_blank()
@@ -169,7 +170,7 @@ class _Parser:
                     if ni >= indent + 2 and _is_map_start(ns) and not ns.startswith("-"):
                         k, r = _split_key(ns)
                         self.i += 1
-                        self._assign(node, k, r, ni + 2 if r in (None, "") else ni + 2)
+                        self._assign(node, k, r, ni)
                         continue
                     break
                 out.append(node)
@@ -196,39 +197,39 @@ class _Parser:
                 break
             key, rest = _split_key(stripped)
             self.i += 1
-            self._assign(node, key, rest, indent + 2)
+            self._assign(node, key, rest, indent)
         return node
 
-    def _assign(self, node: dict[str, Any], key: str, rest: str | None, child_indent: int) -> None:
+    def _assign(self, node: dict[str, Any], key: str, rest: str | None, key_indent: int) -> None:
+        # key_indent is the column of the key. Children are either indented deeper,
+        # or (kubectl style) a sequence at the same column as its parent key.
         if rest is None or rest == "" or rest.startswith("#"):
-            # nested or empty
             self._skip_blank()
             if self.i >= len(self.lines):
                 node[key] = None
                 return
             nxt = self.lines[self.i]
-            if not nxt.strip() or nxt.strip().startswith("#"):
-                node[key] = None
-                return
             ni = self._indent(nxt)
-            if ni >= child_indent - 1 and ni > self._indent_of_current_key(child_indent):
-                # child is more indented
-                if ni >= child_indent or nxt.strip().startswith("-"):
-                    node[key] = self._value(ni)
-                    return
+            ns = nxt.strip()
+            if ni > key_indent or (ni == key_indent and (ns.startswith("- ") or ns == "-")):
+                node[key] = self._value(ni)
+                return
             node[key] = None
             return
         if rest in {"|", "|-", "|+", ">", ">-", ">+"}:
-            node[key] = self._block(child_indent, folded=rest.startswith(">"))
+            node[key] = self._block(key_indent + 1, folded=rest.startswith(">"))
             return
         if rest.startswith("&") or rest.startswith("!"):
-            # tag or anchor — drop tag, ignore anchor name
+            # tag or anchor: drop tag, ignore anchor name
             rest2 = re.sub(r"^(!\S*\s*|&\S+\s*)+", "", rest).strip()
             if not rest2:
                 self._skip_blank()
-                if self.i < len(self.lines) and self._indent(self.lines[self.i]) >= child_indent:
-                    node[key] = self._value(self._indent(self.lines[self.i]))
-                    return
+                if self.i < len(self.lines):
+                    ni = self._indent(self.lines[self.i])
+                    ns = self.lines[self.i].strip()
+                    if ni > key_indent or (ni == key_indent and ns.startswith("- ")):
+                        node[key] = self._value(ni)
+                        return
                 node[key] = None
                 return
             rest = rest2
@@ -246,6 +247,11 @@ class _Parser:
 
     def _block(self, indent: int, folded: bool) -> str:
         chunks: list[str] = []
+        j = self.i
+        while j < len(self.lines) and not self.lines[j].strip():
+            j += 1
+        if j < len(self.lines) and self._indent(self.lines[j]) >= indent:
+            indent = self._indent(self.lines[j])   # block indentation is set by its first line
         while self.i < len(self.lines):
             line = self.lines[self.i]
             if line.strip() == "":
@@ -549,7 +555,7 @@ def grant_allows(g: Grant, verb: str, group: str, res: str) -> bool:
 
 
 class Cluster:
-    def __init__(self, psa_exempt=(), assume_control_plane=False, heuristics=True):
+    def __init__(self, psa_exempt=(), assume_control_plane=False, heuristics=True, eks=False):
         self.roles: dict = {}            # (kind, ns, name) -> doc
         self.bindings: list = []
         self.sas: set = set()
@@ -560,6 +566,10 @@ class Cluster:
         self.psa_exempt = set(psa_exempt)
         self.assume_control_plane = assume_control_plane
         self.heuristics = heuristics
+        self.eks = eks                   # EKS evidence (or forced with --eks)
+        self.stock = False               # input contains Kubernetes' built-in bootstrap RBAC
+        self.secrets_seen = False
+        self.builtin_sas: set = set()    # SAs bound by built-in (rbac-defaults) bindings: the control-plane controllers
         self.users: set = set()
         self.groups: set = {"system:masters", "system:authenticated", "system:unauthenticated"}
         self._agg_cache: dict = {}
@@ -581,6 +591,10 @@ class Cluster:
         name = meta.get("name")
         ns = meta.get("namespace")
         self.counts[kind] += 1
+        if str(name or "").startswith("eks:") or (kind == "ServiceAccount" and name in ("aws-node", "eks-vpc-resource-controller")):
+            self.eks = True
+        if (meta.get("labels") or {}).get("kubernetes.io/bootstrapping") == "rbac-defaults":
+            self.stock = True
         if kind in ("ClusterRole", "Role") and name:
             self.roles[(kind, ns if kind == "Role" else None, name)] = doc
         elif kind in ("ClusterRoleBinding", "RoleBinding") and name:
@@ -591,10 +605,12 @@ class Cluster:
             self.namespaces[name] = meta.get("labels") or {}
         elif kind in WORKLOAD_KINDS and name:
             self._add_workload(doc, kind, name, ns or "default", meta)
-        elif kind == "Secret" and (doc.get("type") == "kubernetes.io/service-account-token"):
-            sa = ((meta.get("annotations") or {}).get("kubernetes.io/service-account.name"))
-            if sa:
-                self.token_secrets[ns or "default"].add(sa)
+        elif kind == "Secret":
+            self.secrets_seen = True
+            if doc.get("type") == "kubernetes.io/service-account-token":
+                sa = ((meta.get("annotations") or {}).get("kubernetes.io/service-account.name"))
+                if sa:
+                    self.token_secrets[ns or "default"].add(sa)
         elif kind in ("ValidatingAdmissionPolicy", "ValidatingAdmissionPolicyBinding", "ClusterPolicy",
                       "Policy", "ConstraintTemplate"):
             self.admission_kinds.add(kind)
@@ -668,10 +684,13 @@ class Cluster:
             return
         bdesc = f"{bkind}/{(bns + '/') if bns else ''}{meta.get('name')}"
         rdesc = f"{rkind}/{rname}"
+        builtin = (meta.get("labels") or {}).get("kubernetes.io/bootstrapping") == "rbac-defaults"
         for s in as_list(b.get("subjects")):
             key = self._subject_key(s, bns)
             if not key:
                 continue
+            if builtin and key.startswith("SA:"):
+                self.builtin_sas.add(key)
             self._register(key)
             via = f"{rdesc} via {bdesc}"
             for r in rules:
@@ -1100,7 +1119,11 @@ def identity_edges(cl: Cluster, key: str, shallow: bool) -> list:
             if nm is not None:
                 continue
             known = cl.token_secrets.get(ns)
-            targets = sorted(known) if known else sorted(cl.sa_by_ns.get(ns, set()))
+            if cl.secrets_seen:
+                # Caller gave us a Secret list: only report SAs that actually have a token secret.
+                targets = sorted(known or ())
+            else:
+                targets = sorted(known) if known else sorted(cl.sa_by_ns.get(ns, set()))
             for sa in targets:
                 out.append(mk(sa_key(ns, sa), "SECRETS_READ", f"read secrets in {ns} for the token of {sa}",
                               "get/list on secrets returns values, including kubernetes.io/service-account-token secrets." if known
@@ -1127,17 +1150,17 @@ def identity_edges(cl: Cluster, key: str, shallow: bool) -> list:
     ccr = H(g, ["create"], "certificates.k8s.io", "certificatesigningrequests", True).get(None)
     cap = H(g, ["update", "patch"], "certificates.k8s.io", "certificatesigningrequests/approval", True).get(None)
     csg = H(g, ["approve"], "certificates.k8s.io", "signers", True).get(None)
-    if ccr and cap and csg and (csg[0] is None or {"*", "kubernetes.io/*", "kubernetes.io/kube-apiserver-client"} & set(csg[0])):
-        out.append(mk(GOAL, "CSR", "request and approve a client certificate with O=system:masters",
-                      "Create a CSR for the kube-apiserver-client signer, approve it yourself, and the issued cert is a cluster-admin identity.",
-                      vt(ccr[1] + cap[1] + csg[1])))
+    # CSR create+approve on the client signer used to mint O=system:masters certs.
+    # Kubernetes 1.22+ rejects that combination at the API server, so it is reported
+    # as a standing exposure rather than a complete path (see exposures()).
+    pass  # kept for clarity; CSR handled in exposures()
     mw = H(g, ["create", "update", "patch"], "admissionregistration.k8s.io", "mutatingwebhookconfigurations", True).get(None)
     if mw:
         out.append(mk(GOAL, "WEBHOOK", "register a mutating webhook that rewrites every pod and sees every object",
                       "The webhook can inject host-level containers into pods created by anyone, including controllers running as cluster-admin.",
                       vt(mw[1]), 2, "likely"))
     for ns, (nm, v) in X(H(g, ["update", "patch"], "", "configmaps")).items():
-        if ns == "kube-system" and (nm is None or "aws-auth" in nm):
+        if ns == "kube-system" and (nm is None or "aws-auth" in nm) and (cl.eks or not cl.stock):
             out.append(mk(GOAL, "AWS_AUTH", "edit aws-auth to map an IAM role you control to system:masters",
                           "On EKS clusters still using the aws-auth ConfigMap, this is a direct cluster-admin grant.", vt(v), 1, "likely"))
 
@@ -1255,7 +1278,7 @@ def exposures(cl: Cluster, include_system: bool):
     out = []
     keys = sorted({k for k in cl.subject_grants} | {sa_key(n, s) for n, s in cl.sas})
     for k in keys:
-        if not include_system and is_system(k):
+        if not include_system and (is_system(k) or k in cl.builtin_sas):
             continue
         g = cl.grants(k)
         if cl.is_admin(g):
@@ -1268,6 +1291,12 @@ def exposures(cl: Cluster, include_system: bool):
         if a:
             out.append({"identity": k, "grant": "write apiservices",
                         "why": "Can redirect an aggregated API (for example metrics) to a server the attacker runs."})
+        ccr = cl.hits(g, ["create"], "certificates.k8s.io", "certificatesigningrequests", True).get(None)
+        cap = cl.hits(g, ["update", "patch"], "certificates.k8s.io", "certificatesigningrequests/approval", True).get(None)
+        csg = cl.hits(g, ["approve"], "certificates.k8s.io", "signers", True).get(None)
+        if ccr and cap and csg and (csg[0] is None or {"*", "kubernetes.io/*", "kubernetes.io/kube-apiserver-client"} & set(csg[0])):
+            out.append({"identity": k, "grant": "create + approve client CSRs (kube-apiserver-client signer)",
+                        "why": "Can mint and approve arbitrary client certificates. On Kubernetes 1.22+ the API server itself rejects O=system:masters on this signer, so it is not a direct path to cluster-admin, but it still lets the holder become any other user."})
     for (kind, _, name), doc in cl.roles.items():
         labels = dig(doc, "metadata", "labels", default={}) or {}
         tgt = [x for x in ("admin", "edit", "view") if str(labels.get(f"rbac.authorization.k8s.io/aggregate-to-{x}")) == "true"]
@@ -1325,10 +1354,14 @@ def analyse(cl: Cluster, only=None, include_system=False, pods=False):
     if pods:
         starts |= {w.key for w in cl.workloads}
     admins, results = [], []
+    skipped_builtin = 0
     for k in sorted(starts):
         if only and only.lower() not in k.lower():
             continue
         if not only and not include_system and is_system(k) and k not in BROAD and not k.startswith("Group:system:serviceaccounts"):
+            continue
+        if not only and not include_system and k in cl.builtin_sas:
+            skipped_builtin += 1
             continue
         g = cl.grants(k)
         if not k.startswith("WL:") and cl.is_admin(g):
@@ -1337,6 +1370,10 @@ def analyse(cl: Cluster, only=None, include_system=False, pods=False):
         path = shortest(cl, k)
         if path:
             results.append({"start": k, "path": path, "sev": path_severity(k, path)})
+    if skipped_builtin:
+        cl.notes.append(f"{skipped_builtin} built-in control-plane service account(s) (bound by Kubernetes' own rbac-defaults bindings, e.g. kube-system controllers) were not used as starting points; they hold their own powerful tokens but only kube-controller-manager can use them. They still appear as intermediate hops. --include-system lists them.")
+    if cl.stock and not cl.eks:
+        cl.notes.append("No EKS evidence in the input, so the aws-auth ConfigMap hop was not considered (use --eks to force it).")
     # group identical chains, keep the broadest starting identity as representative
     groups: dict = {}
     for r in results:
@@ -1404,6 +1441,7 @@ def main(argv=None) -> int:
     ap.add_argument("--assume-control-plane", action="store_true", help="treat root on any node as cluster-admin (self-managed, schedulable control plane)")
     ap.add_argument("--no-heuristics", action="store_true", help="turn off the operator confused-deputy heuristic")
     ap.add_argument("--fail-on", choices=["critical", "high", "medium", "low"], default="high")
+    ap.add_argument("--eks", action="store_true", help="consider the aws-auth ConfigMap hop even if the input shows no EKS signs")
     ap.add_argument("--list-admins", action="store_true", help="list cluster-admin-equivalent identities")
     a = ap.parse_args(argv)
     if not a.paths:
@@ -1419,7 +1457,7 @@ def main(argv=None) -> int:
         print("error: no YAML or JSON input found", file=sys.stderr)
         return 2
     cl, errs = load_cluster(files, texts, psa_exempt=[x for x in a.psa_exempt_ns.split(",") if x],
-                            assume_control_plane=a.assume_control_plane, heuristics=not a.no_heuristics)
+                            assume_control_plane=a.assume_control_plane, heuristics=not a.no_heuristics, eks=a.eks)
     if not cl.roles and not cl.bindings:
         print("error: no Role/ClusterRole/Binding objects parsed; nothing to map", file=sys.stderr)
         return 2

@@ -359,6 +359,18 @@ examples/                     inert fixtures and expected output
 assets/                       Figure 1, its build script, and the Kubernetes logo
 ```
 
+
+## Tested against a live kind cluster
+
+Validated on **kind v0.27.0 / Kubernetes v1.32.2** (local, no cloud) on 2026-11-10.
+
+1. Baseline dump of a stock kind control plane reported **0** escalation paths from non-system identities. Built-in `kube-system` controller ServiceAccounts are skipped as starting points (they still appear as intermediate hops; use `--include-system` to list them). The `aws-auth` hop is off unless the dump shows EKS signs (or you pass `--eks`).
+2. Seeded ten known escalation primitives (pod-create into an unlabeled namespace, bind, escalate, impersonate, nodes/proxy, secrets list over a token Secret, operator confused-deputy, pods/exec, mutating webhook) plus negative controls (PSA-restricted namespace, read-only `view`, resourceNames-pinned Role, secrets list with no token Secrets).
+3. Re-ran the mapper on `kubectl get … -o yaml` plus a trimmed Secret list (metadata only). **10 of 10** expected paths detected; **0** false positives on the negatives. CSR create+approve is reported as a standing exposure, not a path: the live API server rejected `O=system:masters` on `kubernetes.io/kube-apiserver-client` (Kubernetes 1.22+).
+4. Live confirmation where safe: `kubectl auth can-i` / token-only clients for bind, escalate, impersonate (`--as-group=system:masters`), secrets-token theft, and pod-create as a cluster-admin ServiceAccount all succeeded; the PSA-restricted and read-only controls stayed denied. Full dump parse + analyse: ~80 ms.
+
+Parser fix included in this release: kubectl's compact `kind: List` YAML (sequence items at the same column as their parent key) is now accepted. Earlier versions only handled the more-indented style used by the fixtures.
+
 ## License
 
 MIT. See [LICENSE](LICENSE).

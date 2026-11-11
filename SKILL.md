@@ -55,7 +55,7 @@ Exit status: `0` no path at or above `--fail-on` (default `high`), `1` there is 
 | create secrets | mint a token secret for any service account in the namespace |
 | serviceaccounts/token create | request a token for named service accounts |
 | nodes/proxy | `get` alone reaches the kubelet's exec endpoint; lands in every pod |
-| CSR approval | create, approve on the client signer, update `approval`: mint a `system:masters` cert |
+| CSR approval | create + approve on the client signer: standing exposure (Kubernetes 1.22+ rejects `O=system:masters` on `kube-apiserver-client`, so it is no longer a complete path on stock clusters) |
 | Mutating webhook configurations | rewrite every pod admitted anywhere |
 | `aws-auth` ConfigMap write | map an IAM role to `system:masters` on EKS clusters still using it |
 | Workload to node | privileged, hostPID, sensitive hostPath, `SYS_ADMIN` and similar are folded in as node-root hops |
