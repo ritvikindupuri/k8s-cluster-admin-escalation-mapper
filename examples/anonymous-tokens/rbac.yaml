@@ -1,0 +1,61 @@
+# Two classic mistakes in one file: a RoleBinding that lets system:unauthenticated read secrets,
+# and a RoleBinding that lets every authenticated identity request tokens in the same namespace.
+apiVersion: v1
+kind: List
+items:
+  - {apiVersion: v1, kind: Namespace, metadata: {name: legacy}}
+  - {apiVersion: v1, kind: Namespace, metadata: {name: apps, labels: {pod-security.kubernetes.io/enforce: restricted}}}
+  - {apiVersion: v1, kind: ServiceAccount, metadata: {name: deploy, namespace: legacy}}
+  - {apiVersion: v1, kind: ServiceAccount, metadata: {name: web, namespace: apps}}
+  - apiVersion: v1
+    kind: Secret
+    type: kubernetes.io/service-account-token
+    metadata:
+      name: deploy-token
+      namespace: legacy
+      annotations:
+        kubernetes.io/service-account.name: deploy
+  - apiVersion: rbac.authorization.k8s.io/v1
+    kind: ClusterRole
+    metadata: {name: cluster-admin}
+    rules:
+      - {apiGroups: ["*"], resources: ["*"], verbs: ["*"]}
+  - apiVersion: rbac.authorization.k8s.io/v1
+    kind: ClusterRole
+    metadata: {name: debug-read}
+    rules:
+      - {apiGroups: [""], resources: ["secrets", "configmaps"], verbs: ["get", "list"]}
+  - apiVersion: rbac.authorization.k8s.io/v1
+    kind: Role
+    metadata: {name: token-minter, namespace: legacy}
+    rules:
+      - {apiGroups: [""], resources: ["serviceaccounts/token"], verbs: ["create"]}
+  - apiVersion: rbac.authorization.k8s.io/v1
+    kind: RoleBinding
+    metadata: {name: token-minter, namespace: legacy}
+    roleRef: {apiGroup: rbac.authorization.k8s.io, kind: Role, name: token-minter}
+    subjects:
+      - {kind: Group, name: "system:authenticated", apiGroup: rbac.authorization.k8s.io}
+  - apiVersion: rbac.authorization.k8s.io/v1
+    kind: RoleBinding
+    metadata: {name: debug-read, namespace: legacy}
+    roleRef: {apiGroup: rbac.authorization.k8s.io, kind: ClusterRole, name: debug-read}
+    subjects:
+      - {kind: Group, name: "system:unauthenticated", apiGroup: rbac.authorization.k8s.io}
+  - apiVersion: rbac.authorization.k8s.io/v1
+    kind: ClusterRoleBinding
+    metadata: {name: legacy-deploy-admin}
+    roleRef: {apiGroup: rbac.authorization.k8s.io, kind: ClusterRole, name: cluster-admin}
+    subjects:
+      - {kind: ServiceAccount, name: deploy, namespace: legacy}
+  - apiVersion: rbac.authorization.k8s.io/v1
+    kind: ClusterRole
+    metadata: {name: web-narrow}
+    rules:
+      - {apiGroups: [""], resources: ["configmaps"], resourceNames: ["web-config"], verbs: ["get"]}
+  - apiVersion: rbac.authorization.k8s.io/v1
+    kind: RoleBinding
+    metadata: {name: web-narrow, namespace: apps}
+    roleRef: {apiGroup: rbac.authorization.k8s.io, kind: ClusterRole, name: web-narrow}
+    subjects:
+      - {kind: ServiceAccount, name: web, namespace: apps}

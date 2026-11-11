@@ -1,0 +1,25 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: keda-operator
+  namespace: keda
+spec:
+  template:
+    spec:
+      serviceAccountName: keda-operator
+      containers:
+        - name: operator
+          image: registry.example/keda:2.20.0
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: platform-bot
+  namespace: kube-system
+spec:
+  template:
+    spec:
+      serviceAccountName: platform-bot
+      containers:
+        - name: bot
+          image: registry.example/platform-bot:1.4
