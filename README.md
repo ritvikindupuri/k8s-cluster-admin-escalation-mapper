@@ -49,8 +49,6 @@ It is read-only and fully offline. It parses files you give it and never connect
   <img src="assets/architecture.png" alt="Figure 1: From a cluster's RBAC dump to the shortest paths to cluster-admin" width="100%" />
 </p>
 
-<p align="center"><b>Figure 1: From a cluster's RBAC dump to the shortest paths to cluster-admin</b></p>
-
 How a run flows, left to right:
 
 1. **Cluster.** The Kubernetes cluster holds the RBAC objects (ClusterRoles, Roles, bindings, service accounts) and the workloads that use them.
