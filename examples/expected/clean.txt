@@ -1,0 +1,8 @@
+Parsed 1 ClusterRoles, 1 Roles, 1 ClusterRoleBindings, 1 RoleBindings, 3 ServiceAccounts, 0 workloads, 1 namespaces.
+Cluster-admin equivalent identities (1): Group:platform-admins
+
+No escalation path to cluster-admin found from the identities analysed.
+Caveats:
+  - Not modelled: webhook or policy-engine decisions, network reachability to the kubelet, cloud IAM mappings, and anything outside the files given.
+
+Summary: 0 distinct path(s); 0 critical, 0 high, 0 medium

@@ -1,0 +1,28 @@
+Parsed 2 ClusterRoles, 0 Roles, 2 ClusterRoleBindings, 0 RoleBindings, 4 ServiceAccounts, 2 workloads, 2 namespaces.
+Cluster-admin equivalent identities (1): SA:kube-system/network-installer
+  - SA:kube-system/network-installer runs DaemonSet/network-installer: popping that pod is cluster-admin
+
+[HIGH] PATH 1: SA:monitoring/metrics-agent -> cluster-admin, 2 hops
+  Pods running as it: DaemonSet/node-exporter
+  1. SA:monitoring/metrics-agent -> WL:kube-system/DaemonSet/network-installer  [likely]
+     exec in DaemonSet/network-installer through the kubelet
+     why: nodes/proxy reaches the kubelet API; its exec endpoint authorizes the WebSocket handshake as a plain `get`.
+     grant: ClusterRole/metrics-agent via ClusterRoleBinding/metrics-agent
+  2. WL:kube-system/DaemonSet/network-installer -> SA:kube-system/network-installer
+     take the ServiceAccount token mounted in DaemonSet/network-installer
+     why: Anyone running code in that pod can read /var/run/secrets/kubernetes.io/serviceaccount/token and act as kube-system/network-installer.
+     grant: DaemonSet kube-system/network-installer
+  3. SA:kube-system/network-installer -> CLUSTER-ADMIN
+     already holds `*` on `*` cluster-wide
+     why: Cluster-admin equivalent.
+     grant: ClusterRole/cluster-admin via ClusterRoleBinding/cni-admin
+  Fix: Remove nodes/proxy. Monitoring agents should use the nodes/metrics, nodes/stats and nodes/log subresources (fine-grained kubelet authorization, GA in Kubernetes 1.36), and port 10250 should not be reachable from pods.
+
+Smallest set of changes (greedy cover, most paths first):
+  1. ClusterRole/metrics-agent via ClusterRoleBinding/metrics-agent  [NODES_PROXY] removes 1 of 1 path(s)
+     Remove nodes/proxy. Monitoring agents should use the nodes/metrics, nodes/stats and nodes/log subresources (fine-grained kubelet authorization, GA in Kubernetes 1.36), and port 10250 should not be reachable from pods.
+
+Caveats:
+  - Not modelled: webhook or policy-engine decisions, network reachability to the kubelet, cloud IAM mappings, and anything outside the files given.
+
+Summary: 1 distinct path(s); 0 critical, 1 high, 0 medium

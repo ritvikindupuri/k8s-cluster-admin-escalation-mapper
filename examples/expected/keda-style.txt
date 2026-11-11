@@ -1,0 +1,43 @@
+Parsed 3 ClusterRoles, 1 Roles, 2 ClusterRoleBindings, 2 RoleBindings, 5 ServiceAccounts, 2 workloads, 3 namespaces.
+Cluster-admin equivalent identities (1): SA:kube-system/platform-bot
+  - SA:kube-system/platform-bot runs Deployment/platform-bot: popping that pod is cluster-admin
+
+[HIGH] PATH 1: Group:tenant-a-devs -> cluster-admin, 2 hops (includes a heuristic hop, verify it)
+  1. Group:tenant-a-devs -> SA:keda/keda-operator  [heuristic]
+     write custom resources (keda.sh) that operator keda/keda-operator reconciles
+     why: Heuristic: the operator acts on these objects with its own wider permissions. Real cases exist (KEDA GHSA-637c-6jxx-4rwm: a namespace tenant made the operator send its token to a tenant-controlled endpoint).
+     grant: custom resource write access
+  2. SA:keda/keda-operator -> SA:kube-system/platform-bot
+     run a pod as kube-system/platform-bot (jobs in kube-system)
+     why: Set serviceAccountName: platform-bot in the pod spec; the token is mounted into your container.
+     grant: ClusterRole/keda-operator via ClusterRoleBinding/keda-operator
+  3. SA:kube-system/platform-bot -> CLUSTER-ADMIN
+     already holds `*` on `*` cluster-wide
+     why: Cluster-admin equivalent.
+     grant: ClusterRole/cluster-admin via ClusterRoleBinding/platform-bot-admin
+  Fix: Check that the operator rejects references to tenant-controlled endpoints and uses a namespaced identity per tenant. Limit who can create the operator's custom resources to a dedicated role.
+
+[HIGH] PATH 2: SA:keda/keda-operator -> cluster-admin, 1 hop
+  Pods running as it: Deployment/keda-operator
+  1. SA:keda/keda-operator -> SA:kube-system/platform-bot
+     run a pod as kube-system/platform-bot (jobs in kube-system)
+     why: Set serviceAccountName: platform-bot in the pod spec; the token is mounted into your container.
+     grant: ClusterRole/keda-operator via ClusterRoleBinding/keda-operator
+  2. SA:kube-system/platform-bot -> CLUSTER-ADMIN
+     already holds `*` on `*` cluster-wide
+     why: Cluster-admin equivalent.
+     grant: ClusterRole/cluster-admin via ClusterRoleBinding/platform-bot-admin
+  Fix: Drop create/patch on pods and workload controllers from this role, or confine the namespace with Pod Security `restricted` and deploy through a pipeline identity instead.
+
+Smallest set of changes (greedy cover, most paths first):
+  1. ClusterRole/keda-operator via ClusterRoleBinding/keda-operator  [POD_CREATE] removes 2 of 2 path(s)
+     Drop create/patch on pods and workload controllers from this role, or confine the namespace with Pod Security `restricted` and deploy through a pipeline identity instead.
+
+Standing exposures (no complete path by themselves):
+  - SA:keda/keda-operator: write validatingwebhookconfigurations. Can rewrite or disable the cluster's policy-engine webhooks, which removes guardrails that stop other hops.
+  - SA:keda/keda-operator: write apiservices. Can redirect an aggregated API (for example metrics) to a server the attacker runs.
+
+Caveats:
+  - Not modelled: webhook or policy-engine decisions, network reachability to the kubelet, cloud IAM mappings, and anything outside the files given.
+
+Summary: 2 distinct path(s); 0 critical, 2 high, 0 medium

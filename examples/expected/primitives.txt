@@ -1,0 +1,80 @@
+Parsed 7 ClusterRoles, 2 Roles, 6 ClusterRoleBindings, 2 RoleBindings, 11 ServiceAccounts, 1 workloads, 5 namespaces.
+Cluster-admin equivalent identities (2): SA:ops/platform-admin, User:admin@example.com
+  - SA:ops/platform-admin runs Deployment/platform-admin: popping that pod is cluster-admin
+
+[HIGH] PATH 1: Group:team-a-devs -> cluster-admin, 2 hops
+  1. Group:team-a-devs -> root on a node  [likely]
+     schedule a host-level pod in team-a (deployments)
+     why: Namespace team-a carries no Pod Security enforce label; privileged, hostPID or a hostPath mount of / is accepted, which is root on the node.
+     grant: Role/deployer via RoleBinding/team-a/deployer
+  2. root on a node -> SA:ops/platform-admin  [likely]
+     read the projected token of ops/platform-admin
+     why: Root on a node can read every projected ServiceAccount token of pods on that node, and a pod author can pick the node.
+     grant: node root
+  3. SA:ops/platform-admin -> CLUSTER-ADMIN
+     already holds `*` on `*` cluster-wide
+     why: Cluster-admin equivalent.
+     grant: ClusterRole/cluster-admin via ClusterRoleBinding/platform-admin
+  Fix: Drop create/patch on pods and workload controllers from this role, or confine the namespace with Pod Security `restricted` and deploy through a pipeline identity instead.
+
+[HIGH] PATH 2: SA:ci/cert-bot -> cluster-admin, 1 hop
+  1. SA:ci/cert-bot -> CLUSTER-ADMIN
+     request and approve a client certificate with O=system:masters
+     why: Create a CSR for the kube-apiserver-client signer, approve it yourself, and the issued cert is a cluster-admin identity.
+     grant: ClusterRole/cert-approver via ClusterRoleBinding/cert-approver
+  Fix: Remove update on certificatesigningrequests/approval, or restrict `approve` on signers to a non-client-auth signer name.
+
+[HIGH] PATH 3: SA:ci/policy-sync -> cluster-admin, 1 hop
+  1. SA:ci/policy-sync -> CLUSTER-ADMIN  [likely]
+     register a mutating webhook that rewrites every pod and sees every object
+     why: The webhook can inject host-level containers into pods created by anyone, including controllers running as cluster-admin.
+     grant: ClusterRole/policy-manager via ClusterRoleBinding/policy-manager
+  Fix: Remove write access to mutatingwebhookconfigurations. Only the controller that owns the webhook should patch it, and only its own configuration by name.
+
+[HIGH] PATH 4: SA:ci/rbac-sync -> cluster-admin, 1 hop
+  1. SA:ci/rbac-sync -> CLUSTER-ADMIN
+     patch a ClusterRole you already hold and add `*`
+     why: `escalate` switches off the check that stops you granting permissions you lack.
+     grant: ClusterRole/role-curator via ClusterRoleBinding/role-curator
+  Fix: Remove the `escalate` verb. Nothing but the RBAC controller or a break-glass role should hold it.
+
+[HIGH] PATH 5: SA:ci/release-bot -> cluster-admin, 1 hop
+  1. SA:ci/release-bot -> CLUSTER-ADMIN
+     bind cluster-admin to yourself with a new ClusterRoleBinding
+     why: `bind` lets you reference a role you do not hold; create on clusterrolebindings completes it.
+     grant: ClusterRole/release-manager via ClusterRoleBinding/release-manager
+  Fix: Remove the `bind` verb on roles/clusterroles, or pin it with resourceNames to the exact low-privilege roles that may be granted.
+
+[HIGH] PATH 6: User:dana@example.com -> cluster-admin, 1 hop
+  1. User:dana@example.com -> SA:ops/platform-admin
+     impersonate SA:ops/platform-admin
+     why: Send Impersonate-User and the API server authorizes you as that identity.
+     grant: ClusterRole/support-proxy via ClusterRoleBinding/support-proxy
+  2. SA:ops/platform-admin -> CLUSTER-ADMIN
+     already holds `*` on `*` cluster-wide
+     why: Cluster-admin equivalent.
+     grant: ClusterRole/cluster-admin via ClusterRoleBinding/platform-admin
+  Fix: Remove `impersonate`, or pin it with resourceNames to the single user or group a proxy really needs.
+
+Smallest set of changes (greedy cover, most paths first):
+  1. Role/deployer via RoleBinding/team-a/deployer  [POD_CREATE] removes 1 of 6 path(s)
+     Drop create/patch on pods and workload controllers from this role, or confine the namespace with Pod Security `restricted` and deploy through a pipeline identity instead.
+  2. ClusterRole/role-curator via ClusterRoleBinding/role-curator  [ESCALATE] removes 1 of 6 path(s)
+     Remove the `escalate` verb. Nothing but the RBAC controller or a break-glass role should hold it.
+  3. ClusterRole/cert-approver via ClusterRoleBinding/cert-approver  [CSR] removes 1 of 6 path(s)
+     Remove update on certificatesigningrequests/approval, or restrict `approve` on signers to a non-client-auth signer name.
+  4. ClusterRole/support-proxy via ClusterRoleBinding/support-proxy  [IMPERSONATE] removes 1 of 6 path(s)
+     Remove `impersonate`, or pin it with resourceNames to the single user or group a proxy really needs.
+  5. ClusterRole/policy-manager via ClusterRoleBinding/policy-manager  [WEBHOOK] removes 1 of 6 path(s)
+     Remove write access to mutatingwebhookconfigurations. Only the controller that owns the webhook should patch it, and only its own configuration by name.
+  6. ClusterRole/release-manager via ClusterRoleBinding/release-manager  [BIND] removes 1 of 6 path(s)
+     Remove the `bind` verb on roles/clusterroles, or pin it with resourceNames to the exact low-privilege roles that may be granted.
+
+Standing exposures (no complete path by themselves):
+  - SA:ci/policy-sync: write validatingwebhookconfigurations. Can rewrite or disable the cluster's policy-engine webhooks, which removes guardrails that stop other hops.
+  - ClusterRole/team-extras: aggregated into edit: read secrets. Every holder of the aggregated built-in role silently inherits this, in every namespace where the role is bound.
+
+Caveats:
+  - Not modelled: webhook or policy-engine decisions, network reachability to the kubelet, cloud IAM mappings, and anything outside the files given.
+
+Summary: 6 distinct path(s); 0 critical, 6 high, 0 medium

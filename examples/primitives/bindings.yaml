@@ -1,0 +1,62 @@
+apiVersion: rbac.authorization.k8s.io/v1
+kind: List
+items:
+  - apiVersion: rbac.authorization.k8s.io/v1
+    kind: ClusterRoleBinding
+    metadata:
+      name: release-manager
+    roleRef: {apiGroup: rbac.authorization.k8s.io, kind: ClusterRole, name: release-manager}
+    subjects:
+      - {kind: ServiceAccount, name: release-bot, namespace: ci}
+  - apiVersion: rbac.authorization.k8s.io/v1
+    kind: ClusterRoleBinding
+    metadata:
+      name: role-curator
+    roleRef: {apiGroup: rbac.authorization.k8s.io, kind: ClusterRole, name: role-curator}
+    subjects:
+      - {kind: ServiceAccount, name: rbac-sync, namespace: ci}
+  - apiVersion: rbac.authorization.k8s.io/v1
+    kind: ClusterRoleBinding
+    metadata:
+      name: support-proxy
+    roleRef: {apiGroup: rbac.authorization.k8s.io, kind: ClusterRole, name: support-proxy}
+    subjects:
+      - {kind: User, name: dana@example.com, apiGroup: rbac.authorization.k8s.io}
+  - apiVersion: rbac.authorization.k8s.io/v1
+    kind: ClusterRoleBinding
+    metadata:
+      name: cert-approver
+    roleRef: {apiGroup: rbac.authorization.k8s.io, kind: ClusterRole, name: cert-approver}
+    subjects:
+      - {kind: ServiceAccount, name: cert-bot, namespace: ci}
+  - apiVersion: rbac.authorization.k8s.io/v1
+    kind: ClusterRoleBinding
+    metadata:
+      name: policy-manager
+    roleRef: {apiGroup: rbac.authorization.k8s.io, kind: ClusterRole, name: policy-manager}
+    subjects:
+      - {kind: ServiceAccount, name: policy-sync, namespace: ci}
+  - apiVersion: rbac.authorization.k8s.io/v1
+    kind: RoleBinding
+    metadata:
+      name: deployer
+      namespace: team-a
+    roleRef: {apiGroup: rbac.authorization.k8s.io, kind: Role, name: deployer}
+    subjects:
+      - {kind: Group, name: team-a-devs, apiGroup: rbac.authorization.k8s.io}
+  - apiVersion: rbac.authorization.k8s.io/v1
+    kind: ClusterRoleBinding
+    metadata:
+      name: platform-admin
+    roleRef: {apiGroup: rbac.authorization.k8s.io, kind: ClusterRole, name: cluster-admin}
+    subjects:
+      - {kind: ServiceAccount, name: platform-admin, namespace: ops}
+      - {kind: User, name: admin@example.com, apiGroup: rbac.authorization.k8s.io}
+  - apiVersion: rbac.authorization.k8s.io/v1
+    kind: RoleBinding
+    metadata:
+      name: apps-pods
+      namespace: apps
+    roleRef: {apiGroup: rbac.authorization.k8s.io, kind: Role, name: apps-pods}
+    subjects:
+      - {kind: Group, name: apps-devs, apiGroup: rbac.authorization.k8s.io}

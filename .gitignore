@@ -1,0 +1,11 @@
+__pycache__/
+*.pyc
+.venv/
+.DS_Store
+*.zip
+# real cluster dumps stay local
+rbac.yaml
+workloads.yaml
+dump/
+paths.json
+paths.svg

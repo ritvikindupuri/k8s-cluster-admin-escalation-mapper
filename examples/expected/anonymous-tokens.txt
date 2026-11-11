@@ -1,0 +1,36 @@
+Parsed 3 ClusterRoles, 1 Roles, 1 ClusterRoleBindings, 3 RoleBindings, 4 ServiceAccounts, 0 workloads, 2 namespaces.
+Cluster-admin equivalent identities (1): SA:legacy/deploy
+
+[CRITICAL] PATH 1: anyone without credentials (system:unauthenticated) -> cluster-admin, 1 hop
+  1. Group:system:unauthenticated -> SA:legacy/deploy
+     read secrets in legacy for the token of deploy
+     why: get/list on secrets returns values, including kubernetes.io/service-account-token secrets.
+     grant: ClusterRole/debug-read via RoleBinding/legacy/debug-read
+  2. SA:legacy/deploy -> CLUSTER-ADMIN
+     already holds `*` on `*` cluster-wide
+     why: Cluster-admin equivalent.
+     grant: ClusterRole/cluster-admin via ClusterRoleBinding/legacy-deploy-admin
+  Fix: Remove get/list/watch on secrets. List returns every secret value too, so `list` is as bad as `get`. Mount what the workload needs instead.
+
+[CRITICAL] PATH 2: any authenticated identity (system:authenticated) -> cluster-admin, 1 hop
+  Same chain also open to: SA:apps/default, SA:apps/web, SA:legacy/default
+  1. Group:system:authenticated -> SA:legacy/deploy
+     request a token for legacy/deploy
+     why: TokenRequest returns a bearer token for that ServiceAccount.
+     grant: Role/token-minter via RoleBinding/legacy/token-minter
+  2. SA:legacy/deploy -> CLUSTER-ADMIN
+     already holds `*` on `*` cluster-wide
+     why: Cluster-admin equivalent.
+     grant: ClusterRole/cluster-admin via ClusterRoleBinding/legacy-deploy-admin
+  Fix: Remove create on serviceaccounts/token, or pin to the single ServiceAccount via resourceNames.
+
+Smallest set of changes (greedy cover, most paths first):
+  1. Role/token-minter via RoleBinding/legacy/token-minter  [TOKEN_REQUEST] removes 1 of 2 path(s)
+     Remove create on serviceaccounts/token, or pin to the single ServiceAccount via resourceNames.
+  2. ClusterRole/debug-read via RoleBinding/legacy/debug-read  [SECRETS_READ] removes 1 of 2 path(s)
+     Remove get/list/watch on secrets. List returns every secret value too, so `list` is as bad as `get`. Mount what the workload needs instead.
+
+Caveats:
+  - Not modelled: webhook or policy-engine decisions, network reachability to the kubelet, cloud IAM mappings, and anything outside the files given.
+
+Summary: 2 distinct path(s); 2 critical, 0 high, 0 medium
