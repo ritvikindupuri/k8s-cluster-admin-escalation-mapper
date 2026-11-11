@@ -69,7 +69,7 @@ How a run flows, left to right:
 | Output | Text, JSON, Graphviz DOT |
 | Agent integration | `SKILL.md` with YAML frontmatter, loaded by Claude Code and compatible agents |
 | Optional | Graphviz (`dot`) to render the DOT output |
-| Docs only | matplotlib to regenerate Figure 1 (`assets/build_diagram.py`); the Kubernetes logo is from the [kubernetes/kubernetes](https://github.com/kubernetes/kubernetes/tree/master/logo) repository |
+| Docs only | matplotlib to regenerate Figure 1 (`assets/build_diagram.py`) and Figure 2 (`assets/build_escalation_graph.py`); the Kubernetes logo is from the [kubernetes/kubernetes](https://github.com/kubernetes/kubernetes/tree/master/logo) repository |
 
 ## Setup Instructions
 
@@ -234,7 +234,7 @@ One path, exit code `1`. The `[likely]` tag means the hop assumes the kubelet is
 
 #### 3. `primitives`: one identity per escalation primitive
 
-Six identities, each holding one primitive (bind, escalate, impersonate, CSR approval, mutating webhook, pod-create in a namespace without Pod Security labels), plus a restricted namespace as a control and an aggregated role that leaks secrets.
+Five identities, each holding one primitive (bind, escalate, impersonate, mutating webhook, pod-create in a namespace without Pod Security labels), plus a CSR approver reported as a standing exposure, a restricted namespace as a control, and an aggregated role that leaks secrets.
 
 ```bash
 python3 scripts/escalation_map.py examples/primitives
@@ -242,28 +242,35 @@ python3 scripts/escalation_map.py examples/primitives
 
 ```text
 [HIGH] PATH 1: Group:team-a-devs -> cluster-admin, 2 hops
-[HIGH] PATH 2: SA:ci/cert-bot -> cluster-admin, 1 hop
-[HIGH] PATH 3: SA:ci/policy-sync -> cluster-admin, 1 hop
-[HIGH] PATH 4: SA:ci/rbac-sync -> cluster-admin, 1 hop
-[HIGH] PATH 5: SA:ci/release-bot -> cluster-admin, 1 hop
-[HIGH] PATH 6: User:dana@example.com -> cluster-admin, 1 hop
+[HIGH] PATH 2: SA:ci/policy-sync -> cluster-admin, 1 hop
+[HIGH] PATH 3: SA:ci/rbac-sync -> cluster-admin, 1 hop
+[HIGH] PATH 4: SA:ci/release-bot -> cluster-admin, 1 hop
+[HIGH] PATH 5: User:dana@example.com -> cluster-admin, 1 hop
 
 Smallest set of changes (greedy cover, most paths first):
-  1. Role/deployer via RoleBinding/team-a/deployer  [POD_CREATE] removes 1 of 6 path(s)
-  2. ClusterRole/role-curator via ClusterRoleBinding/role-curator  [ESCALATE] removes 1 of 6 path(s)
-  3. ClusterRole/cert-approver via ClusterRoleBinding/cert-approver  [CSR] removes 1 of 6 path(s)
-  4. ClusterRole/support-proxy via ClusterRoleBinding/support-proxy  [IMPERSONATE] removes 1 of 6 path(s)
-  5. ClusterRole/policy-manager via ClusterRoleBinding/policy-manager  [WEBHOOK] removes 1 of 6 path(s)
-  6. ClusterRole/release-manager via ClusterRoleBinding/release-manager  [BIND] removes 1 of 6 path(s)
+  1. Role/deployer via RoleBinding/team-a/deployer  [POD_CREATE] removes 1 of 5 path(s)
+  2. ClusterRole/role-curator via ClusterRoleBinding/role-curator  [ESCALATE] removes 1 of 5 path(s)
+  3. ClusterRole/support-proxy via ClusterRoleBinding/support-proxy  [IMPERSONATE] removes 1 of 5 path(s)
+  4. ClusterRole/policy-manager via ClusterRoleBinding/policy-manager  [WEBHOOK] removes 1 of 5 path(s)
+  5. ClusterRole/release-manager via ClusterRoleBinding/release-manager  [BIND] removes 1 of 5 path(s)
 
 Standing exposures (no complete path by themselves):
+  - SA:ci/cert-bot: create + approve client CSRs. On Kubernetes 1.22+ this is not a direct path to cluster-admin.
   - SA:ci/policy-sync: write validatingwebhookconfigurations. ...
   - ClusterRole/team-extras: aggregated into edit: read secrets. ...
 
-Summary: 6 distinct path(s); 0 critical, 6 high, 0 medium
+Summary: 5 distinct path(s); 0 critical, 5 high, 0 medium
 ```
 
-The identity in the restricted namespace has no path. The aggregated-role exposure is the kind of thing a per-role review never shows: every holder of `edit` inherits secret access without anyone editing a binding. Exit code `1`.
+The identity in the restricted namespace has no path. CSR create+approve is a standing exposure, not a path, because Kubernetes 1.22+ rejects `O=system:masters` on the kube-apiserver-client signer. The aggregated-role exposure is the kind of thing a per-role review never shows: every holder of `edit` inherits secret access without anyone editing a binding. Exit code `1`.
+
+<p align="center">
+  <img src="assets/escalation-graph-primitives.png" alt="Figure 2: Escalation paths found in examples/primitives" width="100%" />
+  <br />
+  <em>Figure 2: Escalation paths found in examples/primitives</em>
+</p>
+
+The picture is drawn from the tool's `--dot` output for this fixture.
 
 #### 4. `anonymous-tokens`: open to everyone
 
@@ -356,20 +363,13 @@ python3 scripts/escalation_map.py examples/nodes-proxy --dot | dot -Tsvg > paths
 SKILL.md                      agent skill definition
 scripts/escalation_map.py     the tool
 examples/                     inert fixtures and expected output
-assets/                       Figure 1, its build script, and the Kubernetes logo
+assets/                       Figures 1 and 2, their build scripts, and the Kubernetes logo
+TESTING.md                    live-cluster and fixture results
 ```
 
+## Testing
 
-## Tested against a live kind cluster
-
-Validated on **kind v0.27.0 / Kubernetes v1.32.2** (local, no cloud) on 2026-11-10.
-
-1. Baseline dump of a stock kind control plane reported **0** escalation paths from non-system identities. Built-in `kube-system` controller ServiceAccounts are skipped as starting points (they still appear as intermediate hops; use `--include-system` to list them). The `aws-auth` hop is off unless the dump shows EKS signs (or you pass `--eks`).
-2. Seeded ten known escalation primitives (pod-create into an unlabeled namespace, bind, escalate, impersonate, nodes/proxy, secrets list over a token Secret, operator confused-deputy, pods/exec, mutating webhook) plus negative controls (PSA-restricted namespace, read-only `view`, resourceNames-pinned Role, secrets list with no token Secrets).
-3. Re-ran the mapper on `kubectl get … -o yaml` plus a trimmed Secret list (metadata only). **10 of 10** expected paths detected; **0** false positives on the negatives. CSR create+approve is reported as a standing exposure, not a path: the live API server rejected `O=system:masters` on `kubernetes.io/kube-apiserver-client` (Kubernetes 1.22+).
-4. Live confirmation where safe: `kubectl auth can-i` / token-only clients for bind, escalate, impersonate (`--as-group=system:masters`), secrets-token theft, and pod-create as a cluster-admin ServiceAccount all succeeded; the PSA-restricted and read-only controls stayed denied. Full dump parse + analyse: ~80 ms.
-
-Parser fix included in this release: kubectl's compact `kind: List` YAML (sequence items at the same column as their parent key) is now accepted. Earlier versions only handled the more-indented style used by the fixtures.
+The live kind-cluster run and the bundled fixture results now live in [TESTING.md](TESTING.md).
 
 ## License
 
