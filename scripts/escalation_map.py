@@ -21,6 +21,7 @@ import argparse
 import heapq
 
 import json
+import os
 import re
 from typing import Any
 
@@ -1429,11 +1430,106 @@ def to_dot(final):
     return "\n".join(rows)
 
 
+# ----------------------------------------------------------------- HTML graph
+
+SHORT_LABEL = {
+    "ADMIN": "already\ncluster-admin", "BIND": "bind cluster-admin", "ESCALATE": "escalate on role",
+    "IMPERSONATE": "impersonate", "EXEC": "exec into pod", "SECRETS_READ": "read token\nsecret",
+    "SECRET_MINT": "mint token\nsecret", "TOKEN_REQUEST": "request SA\ntoken", "NODES_PROXY": "nodes/proxy\nto kubelet",
+    "CSR": "approve CSR", "WEBHOOK": "mutating webhook", "AWS_AUTH": "edit aws-auth", "DEPUTY": "operator\nconfused deputy",
+    "WL_SA": "take pod's\nSA token", "WL_ESCAPE": "escape to node", "NODE_TOKENS": "steal SA token\non the node",
+}
+
+
+def _node_type(key: str) -> str:
+    if key == GOAL:
+        return "admin"
+    if key == NODE_ROOT:
+        return "noderoot"
+    for pre, t in (("Group:", "group"), ("User:", "user"), ("SA:", "sa"), ("WL:", "workload")):
+        if key.startswith(pre):
+            return t
+    return "other"
+
+
+def _node_label(key: str) -> str:
+    if key == GOAL:
+        return "CLUSTER-ADMIN"
+    if key == NODE_ROOT:
+        return "NODE ROOT"
+    if key.startswith("WL:"):
+        ns, kind, name = (key[3:].split("/", 2) + ["", ""])[:3]
+        return f"{kind}/{name}" if name else key[3:]
+    return key.split(":", 1)[1] if ":" in key else key
+
+
+def graph_data(final, admin_equiv):
+    """The union of all reported paths as nodes and edges for the HTML page."""
+    nodes, edges, seen = {}, [], set()
+    n_in: dict = {}
+
+    def node(key):
+        if key not in nodes:
+            nodes[key] = {"id": key, "label": _node_label(key), "type": _node_type(key)}
+        return nodes[key]
+
+    for r in final:
+        st = node(r["start"])
+        st["sev"] = r["sev"]
+        st["steps"] = n_hops(r)
+        st["also"] = list(r["also"])
+        for src, e in r["path"]:
+            node(src); node(e.dst)
+            k = (src, e.dst, e.kind)
+            if k in seen:
+                continue
+            seen.add(k)
+            n_in[e.dst] = n_in.get(e.dst, 0) + 1
+            if e.kind == "POD_CREATE":
+                short = "create pod\n(no Pod Security)" if e.dst == NODE_ROOT else "create pod\nunder the SA"
+            else:
+                short = SHORT_LABEL.get(e.kind, e.kind.lower().replace("_", " "))
+            edges.append({"source": src, "target": e.dst, "kind": e.kind, "shortLabel": short, "action": e.text,
+                          "why": e.how, "grant": e.via, "confidence": e.conf, "fix": EDGE_FIX.get(e.kind, "")})
+    for k, n in nodes.items():
+        n["inCount"] = n_in.get(k, 0)
+    c = {s: sum(1 for r in final if r["sev"] == s) for s in ("critical", "high", "medium")}
+    n_adm = len(admin_equiv)
+    if final:
+        subtitle = (f"{len(final)} path{'s' if len(final) != 1 else ''} found ({c['critical']} critical, {c['high']} high, {c['medium']} medium)"
+                    " \u00b7 every arrow is one step an attacker can take")
+    else:
+        subtitle = "Read-only static analysis of the files given"
+    return {"title": "Escalation paths to cluster-admin", "subtitle": subtitle,
+            "emptyNote": f"{n_adm} cluster-admin equivalent identit{'y' if n_adm == 1 else 'ies'} exist; no other identity analysed can reach cluster-admin." if n_adm
+                         else "None of the identities analysed can reach it through the grants given.",
+            "nodes": list(nodes.values()), "edges": edges}
+
+
+def write_html(out_path, final, admin_equiv) -> None:
+    """Write one self-contained interactive page (D3 inlined, no network needed)."""
+    here = os.path.dirname(os.path.abspath(__file__))
+    try:
+        with open(os.path.join(here, "graph_template.html"), encoding="utf-8") as f:
+            page = f.read()
+        with open(os.path.join(here, "d3.v7.min.js"), encoding="utf-8") as f:
+            d3js = f.read()
+    except OSError as ex:
+        raise SystemExit(f"error: --html needs graph_template.html and d3.v7.min.js next to this script ({ex})")
+    data = json.dumps(graph_data(final, admin_equiv), ensure_ascii=True)
+    data = data.replace("<", "\\u003c").replace(">", "\\u003e").replace("&", "\\u0026")
+    d3js = d3js.replace("</script", "<\\/script")
+    page = page.replace("/*__D3__*/", "\n" + d3js + "\n", 1).replace("/*__DATA__*/", data, 1)
+    with open(out_path, "w", encoding="utf-8") as f:
+        f.write(page)
+
+
 def main(argv=None) -> int:
     ap = argparse.ArgumentParser(description="Map RBAC privilege-escalation paths to cluster-admin from manifests or kubectl output. Read-only, offline.")
     ap.add_argument("paths", nargs="*", help="files or directories of YAML/JSON, or - for stdin")
     ap.add_argument("--json", action="store_true", help="machine-readable output")
     ap.add_argument("--dot", action="store_true", help="print the union of reported paths as Graphviz DOT")
+    ap.add_argument("--html", metavar="OUT.html", help="also write an interactive, self-contained D3 graph of the reported paths (works offline)")
     ap.add_argument("--from", dest="only", metavar="TEXT", help="only paths starting at identities whose key contains TEXT (e.g. SA:payments/ci)")
     ap.add_argument("--pods", action="store_true", help="also report 'if this workload is popped' paths for every workload")
     ap.add_argument("--include-system", action="store_true", help="include system:* identities as starting points")
@@ -1463,6 +1559,9 @@ def main(argv=None) -> int:
         return 2
     admins, final = analyse(cl, a.only, a.include_system, a.pods)
     admin_show = [x for x in admins if a.include_system or not is_system(x)]
+    if a.html:
+        write_html(a.html, final, admin_show)
+        print(f"wrote {a.html}", file=sys.stderr)
     cuts = cut_list(final)
     expo = exposures(cl, a.include_system)
     worst = max([SEV_ORDER[r["sev"]] for r in final], default=-1)

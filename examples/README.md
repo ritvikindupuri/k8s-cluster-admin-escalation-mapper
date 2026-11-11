@@ -10,6 +10,8 @@ Inert YAML in the shapes this skill reads. Names are invented; nothing here shou
 | `anonymous-tokens/` | `system:unauthenticated` allowed to read secrets in a namespace holding a token secret for a cluster-admin SA; `system:authenticated` allowed to request tokens there | 2 critical paths; exit 1 |
 | `clean/` | Restricted namespace, narrow role pinned by resourceNames, one admin group | 0 paths; exit 0 |
 
+Extra fixture for the HTML graph: `synthetic-large/rbac.json` is a larger invented cluster (10 paths, 15 nodes, up to 4 hops, mixed identity types) used by `tests/render_check.py`. It has no expected text output.
+
 ```bash
 python3 scripts/escalation_map.py examples/keda-style --psa-exempt-ns kube-system
 python3 scripts/escalation_map.py examples/nodes-proxy

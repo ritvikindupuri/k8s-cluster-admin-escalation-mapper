@@ -39,7 +39,8 @@ It is read-only and fully offline. It parses files you give it and never connect
 - **Standing exposures.** Grants that are dangerous but do not finish a path with the data you gave it, such as write access to validating webhooks or APIServices, or aggregated roles that quietly hand every `edit` holder access to secrets.
 - **Real RBAC semantics.** Aggregated ClusterRoles are expanded, RoleBindings to ClusterRoles stay scoped to their namespace, `resourceNames` pins are respected, and group inheritance works (`system:authenticated`, `system:unauthenticated`, `system:serviceaccounts`, per-namespace groups).
 - **Honest confidence labels.** Hops resting on an assumption are marked `[likely]`; the operator confused-deputy rule is marked `[heuristic]` and can be switched off with `--no-heuristics`.
-- **Output for people and pipelines.** Human-readable report, `--json`, and `--dot` for Graphviz.
+- **Output for people and pipelines.** Human-readable report, `--json`, `--dot` for Graphviz, and `--html` for an interactive graph in a single offline file.
+- **Interactive graph.** `--html out.html` draws every reported path as a layered D3 graph: cards by identity type, dashed arrows for hops that rest on an assumption, hover any arrow for the grant, the reason it works and the fix.
 - **CI-friendly exit codes.** `0` clean, `1` a path at or above `--fail-on`, `2` bad input.
 - **Offline and read-only.** Standard library only, no cluster credentials, no network calls.
 
@@ -64,15 +65,16 @@ How a run flows, left to right:
   <img src="assets/escalation-graph-primitives.png" alt="Figure 2: Escalation paths to cluster-admin (examples/primitives)" width="100%" />
 </p>
 
-Every arrow is one step an attacker can take, and every chain ends at cluster-admin (red). Dashed arrows are hops that rest on an assumption, such as a namespace with no Pod Security labels. Open `assets/graph/index.html` in a browser for the interactive version (drag nodes, scroll to zoom). A vector copy is at [`assets/escalation-graph-primitives.svg`](assets/escalation-graph-primitives.svg).
+Every arrow is one step an attacker can take, and every chain ends at cluster-admin (red). Dashed arrows are hops that rest on an assumption, such as a namespace with no Pod Security labels. A vector copy is at [`assets/escalation-graph-primitives.svg`](assets/escalation-graph-primitives.svg).
 
-To draw the graph for your own cluster:
+The tool draws this for any input, not only the bundled example:
 
 ```bash
-python3 scripts/escalation_map.py your-rbac.yaml --json > out.json
-python3 assets/graph/to_d3.py out.json     # writes assets/graph/graph-data.js
-# then open assets/graph/index.html
+python3 scripts/escalation_map.py your-rbac.yaml workloads.yaml --html graph.html
+# then open graph.html in a browser
 ```
+
+`graph.html` is one self-contained file with D3 inlined, so it works offline and from `file://`. See [Interactive graph](#interactive-graph---html) in the usage guide.
 
 ## Tech Stack
 
@@ -82,10 +84,11 @@ python3 assets/graph/to_d3.py out.json     # writes assets/graph/graph-data.js
 | Input | `kubectl get -o yaml` or `-o json`, Helm-rendered manifests, plain YAML/JSON files |
 | Engine | Python 3.9 or newer, standard library only; a small built-in YAML loader, so PyYAML is not required |
 | Search | Directed graph with Dijkstra-style shortest paths and a greedy set cover for the cut list |
-| Output | Text, JSON, Graphviz DOT |
+| Output | Text, JSON, Graphviz DOT, self-contained interactive HTML |
 | Agent integration | `SKILL.md` with YAML frontmatter, loaded by Claude Code and compatible agents |
+| Graph page | [D3.js](https://d3js.org) v7, vendored as `scripts/d3.v7.min.js` and inlined into the `--html` file; no network at view time |
 | Optional | Graphviz (`dot`) to render the DOT output |
-| Docs only | matplotlib to regenerate Figure 1 (`assets/build_diagram.py`); [D3.js](https://d3js.org) v7 (vendored in `assets/graph/`) and headless Chromium via Playwright (`assets/graph/render.py`) to regenerate Figure 2; the Kubernetes logo is from the [kubernetes/kubernetes](https://github.com/kubernetes/kubernetes/tree/master/logo) repository |
+| Docs only | matplotlib to regenerate Figure 1 (`assets/build_diagram.py`); [D3.js](https://d3js.org) v7 (vendored in `assets/graph/`) and headless Chromium via Playwright (`assets/graph/render.py`) to regenerate Figure 2, and Playwright again for `tests/render_check.py`; the Kubernetes logo is from the [kubernetes/kubernetes](https://github.com/kubernetes/kubernetes/tree/master/logo) repository |
 
 ## Setup Instructions
 
@@ -119,7 +122,7 @@ mkdir -p .claude/skills
 cp -r /path/to/k8s-cluster-admin-escalation-mapper .claude/skills/
 ```
 
-Other agents that read `SKILL.md` files: copy the same folder into whatever skills directory your agent uses. The skill is just `SKILL.md` plus `scripts/escalation_map.py`; the other folders are optional. Start a new agent session afterwards so it picks the skill up.
+Other agents that read `SKILL.md` files: copy the same folder into whatever skills directory your agent uses. The skill is `SKILL.md` plus the `scripts/` folder (`escalation_map.py`, `graph_template.html` and `d3.v7.min.js`; the last two are only needed for `--html`). The other folders are optional. Start a new agent session afterwards so it picks the skill up.
 
 ### 4. Produce the input from your cluster
 
@@ -175,6 +178,7 @@ python3 scripts/escalation_map.py [paths ...] [options]
 | `--fail-on {critical,high,medium,low}` | Lowest severity that makes the exit code `1` (default `high`) |
 | `--json` | Machine-readable output |
 | `--dot` | Union of reported paths as Graphviz DOT |
+| `--html OUT.html` | Also write an interactive graph of the reported paths as one self-contained HTML file. The normal report still prints; with zero paths the page says so |
 | `--list-admins` | List cluster-admin-equivalent identities |
 
 Common runs:
@@ -186,8 +190,38 @@ python3 scripts/escalation_map.py dump/ --pods
 python3 scripts/escalation_map.py dump/ --psa-exempt-ns kube-system,monitoring
 python3 scripts/escalation_map.py dump/ --json > paths.json
 python3 scripts/escalation_map.py dump/ --dot | dot -Tsvg > paths.svg
+python3 scripts/escalation_map.py dump/ --html paths.html
 kubectl get clusterroles,clusterrolebindings,roles,rolebindings,serviceaccounts,namespaces -A -o yaml | python3 scripts/escalation_map.py -
 ```
+
+### Interactive graph (`--html`)
+
+```bash
+python3 scripts/escalation_map.py rbac.yaml workloads.yaml --html paths.html
+```
+
+The command prints the usual report and also writes `paths.html`. Open it in any browser; it needs no server and no internet connection.
+
+<p align="center">
+  <img src="assets/html-output/html-primitives.png" alt="Interactive graph for examples/primitives" width="100%" />
+</p>
+
+How to read and use it:
+
+1. **Columns.** Start identities sit on the left. Each column to the right is one more step, and cluster-admin is always the last column. Long hops run through the gaps between cards instead of behind them.
+2. **Cards.** Colour and icon show the type: group, user, service account, workload, root on a node, and the cluster-admin goal. Start cards carry a severity badge (CRITICAL, HIGH, MEDIUM). Long names are shortened on the card and shown in full in the tooltip.
+3. **Arrows.** Solid means the hop is certain from the files given. Dashed means it rests on an assumption (for example no Pod Security label is visible). Dotted means the operator confused-deputy heuristic, so check it by hand. Arrows into cluster-admin are red.
+4. **Hover an arrow** to see what the attacker does, why the grant allows it, the exact role and binding behind it, how confident the tool is, and the one change that removes the hop.
+5. **Hover a card** to highlight everything downstream of it and dim the rest. The tooltip lists other identities that share the same chain.
+6. **Drag a card** to rearrange, scroll to zoom, drag the background to pan, double-click the background to reset the view.
+7. **Dense graphs.** If a label has no clear space it is hidden and the footer says how many; hover that arrow to read it.
+8. **No paths.** If nothing reaches cluster-admin the page says so instead of drawing an empty canvas.
+
+<p align="center">
+  <img src="assets/html-output/html-primitives-tooltip.png" alt="Hovering an arrow shows the grant, why it works and the fix" width="100%" />
+</p>
+
+The page contains the identity and grant names from your input, so treat it with the same care as the text report.
 
 ### C. Walking through the bundled fixtures
 
@@ -372,15 +406,19 @@ python3 scripts/escalation_map.py examples/nodes-proxy --dot | dot -Tsvg > paths
 ```text
 SKILL.md                      agent skill definition
 scripts/escalation_map.py     the tool
+scripts/graph_template.html   page template for --html
+scripts/d3.v7.min.js          D3 v7, inlined into --html output
+tests/render_check.py         renders every fixture's --html page headlessly and checks for overlaps
 examples/                     inert fixtures and expected output
 assets/                       Figures 1 and 2, their build scripts, and the Kubernetes logo
-assets/graph/                 D3.js graph page, JSON-to-graph converter, and renderer
-TESTING.md                    live-cluster and fixture results
+assets/graph/                 the original static Figure 2 build (D3.js page, JSON-to-graph converter, renderer)
+assets/html-output/           screenshots of the --html output
+TESTING.md                    test report: live cluster, fixtures, HTML graph
 ```
 
 ## Testing
 
-The live kind-cluster run and the bundled fixture results now live in [TESTING.md](TESTING.md).
+The test report (live kind cluster, bundled fixtures, HTML graph rendering) is in [TESTING.md](TESTING.md).
 
 ## License
 

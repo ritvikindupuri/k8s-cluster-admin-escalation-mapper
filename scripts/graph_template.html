@@ -1,0 +1,531 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>Escalation paths to cluster-admin</title>
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<style>
+  html, body { margin: 0; background: #fff; height: 100%; }
+  #wrap { width: 100vw; height: 100vh; }
+  svg { display: block; width: 100%; height: 100%; cursor: grab; }
+  svg:active { cursor: grabbing; }
+  #tip { position: fixed; z-index: 10; max-width: 440px; pointer-events: none; display: none;
+         background: #0f172a; color: #e2e8f0; border-radius: 10px; padding: 11px 14px; box-shadow: 0 8px 24px rgba(15,23,42,.28);
+         font: 13px/1.45 Inter, "Helvetica Neue", Helvetica, Arial, sans-serif; }
+  #tip b { color: #fff; }
+  #tip .h { font-size: 14px; font-weight: 700; color: #fff; margin-bottom: 4px; }
+  #tip .k { color: #94a3b8; font-size: 11px; font-weight: 700; letter-spacing: .06em; text-transform: uppercase; margin-top: 7px; }
+  #tip code { color: #fbbf24; font: 12px ui-monospace, Menlo, Consolas, monospace; word-break: break-word; }
+</style>
+</head>
+<body>
+<div id="wrap"><svg id="graph" xmlns="http://www.w3.org/2000/svg"></svg></div>
+<div id="tip"></div>
+<script>/*__D3__*/</script>
+<script>window.GRAPH_DATA = /*__DATA__*/;</script>
+<script>
+(function () {
+  "use strict";
+  const DATA = window.GRAPH_DATA;
+  const CARD_W = 330, CARD_H = 66, ICON_R = 21;
+  const SPACING = 540, MARGIN = 70, TOP = 190;
+  const FONT = "Inter, 'Helvetica Neue', Helvetica, Arial, sans-serif";
+
+  const TYPES = {
+    group:    { color: "#2563eb", tint: "#eff6ff", tag: "GROUP" },
+    user:     { color: "#7c3aed", tint: "#f5f3ff", tag: "USER" },
+    sa:       { color: "#0d9488", tint: "#f0fdfa", tag: "SERVICE ACCOUNT" },
+    noderoot: { color: "#d97706", tint: "#fffbeb", tag: "HOST PRIVILEGE" },
+    admin:    { color: "#dc2626", tint: "#fef2f2", tag: "GOAL" },
+    workload: { color: "#4f46e5", tint: "#eef2ff", tag: "WORKLOAD" },
+    other:    { color: "#475569", tint: "#f1f5f9", tag: "IDENTITY" },
+  };
+  const SEV = {
+    critical: { fg: "#b91c1c", bg: "#fee2e2" },
+    high:     { fg: "#b45309", bg: "#fef3c7" },
+    medium:   { fg: "#a16207", bg: "#fef9c3" },
+  };
+
+  // ------------------------------------------------------------------ model
+  const nodes = DATA.nodes.map(d => ({ ...d, dummy: false, hh: CARD_H / 2 }));
+  const byId = new Map(nodes.map(d => [d.id, d]));
+  const edges = DATA.edges.map(e => ({ ...e, s: byId.get(e.source), t: byId.get(e.target) }));
+  const empty = edges.length === 0;
+
+  // ---- layers: longest path from the sources, cycle-safe, goal pinned to the last column
+  function assignLayers() {
+    const out = new Map(nodes.map(n => [n, []]));
+    edges.forEach(e => out.get(e.s).push(e));
+    const state = new Map(), order = [];
+    const back = new Set();
+    (function visitAll() {
+      const visit = n => {
+        state.set(n, 1);
+        out.get(n).forEach(e => {
+          const st = state.get(e.t);
+          if (st === 1) back.add(e);
+          else if (!st) visit(e.t);
+        });
+        state.set(n, 2); order.push(n);
+      };
+      nodes.forEach(n => { if (!state.get(n)) visit(n); });
+    })();
+    nodes.forEach(n => { n.layer = 0; });
+    order.reverse().forEach(n => out.get(n).forEach(e => {
+      if (!back.has(e)) e.t.layer = Math.max(e.t.layer, n.layer + 1);
+    }));
+    const last = d3.max(nodes, n => n.layer);
+    nodes.forEach(n => { if (n.type === "admin") n.layer = last; });
+    return last;
+  }
+
+  // ---- split long edges with invisible lane nodes so they route between cards
+  const dummies = [];
+  function addDummies() {
+    edges.forEach(e => {
+      e.chain = [e.s];
+      for (let l = e.s.layer + 1; l < e.t.layer; l++) {
+        const d = { id: `~${e.source}>${e.target}>${e.kind}@${l}`, dummy: true, layer: l, hh: 7, edge: e };
+        dummies.push(d); e.chain.push(d);
+      }
+      e.chain.push(e.t);
+    });
+  }
+
+  // ---- order inside each layer: barycentre sweeps, keep the ordering with fewest crossings
+  function orderLayers(L) {
+    const all = nodes.concat(dummies);
+    const cols = d3.range(L + 1).map(l => all.filter(n => n.layer === l));
+    const sevRank = { critical: 0, high: 1, medium: 2 };
+    cols[0].sort((a, b) => (sevRank[a.sev] ?? 3) - (sevRank[b.sev] ?? 3) || String(a.label).localeCompare(String(b.label)));
+    const links = [];
+    edges.forEach(e => { for (let i = 0; i + 1 < e.chain.length; i++) links.push([e.chain[i], e.chain[i + 1]]); });
+    const preds = new Map(all.map(n => [n, []])), succs = new Map(all.map(n => [n, []]));
+    links.forEach(([a, b]) => { succs.get(a).push(b); preds.get(b).push(a); });
+    const pos = new Map();
+    const reindex = () => cols.forEach(c => c.forEach((n, i) => pos.set(n, i)));
+    const crossings = () => {
+      let c = 0;
+      for (let l = 0; l < L; l++) {
+        const ls = links.filter(([a]) => a.layer === l).map(([a, b]) => [pos.get(a), pos.get(b)]);
+        for (let i = 0; i < ls.length; i++) for (let j = i + 1; j < ls.length; j++)
+          if ((ls[i][0] - ls[j][0]) * (ls[i][1] - ls[j][1]) < 0) c++;
+      }
+      return c;
+    };
+    reindex();
+    let best = cols.map(c => c.slice()), bestC = crossings();
+    for (let it = 0; it < 24 && bestC > 0; it++) {
+      const down = it % 2 === 0;
+      const seq = down ? d3.range(1, L + 1) : d3.range(L - 1, -1, -1);
+      seq.forEach(l => {
+        const nb = down ? preds : succs;
+        const bary = new Map(cols[l].map(n => {
+          const ns = nb.get(n);
+          return [n, ns.length ? d3.mean(ns, m => pos.get(m)) : pos.get(n)];
+        }));
+        cols[l].sort((a, b) => bary.get(a) - bary.get(b) || pos.get(a) - pos.get(b));
+        cols[l].forEach((n, i) => pos.set(n, i));
+      });
+      const c = crossings();
+      if (c < bestC) { bestC = c; best = cols.map(x => x.slice()); }
+    }
+    best.forEach((c, l) => { cols[l] = c; });
+    return { cols, preds, succs };
+  }
+
+  // ---- vertical placement: pull each node toward its neighbours, never overlapping (isotonic regression)
+  const sepOf = (a, b) => a.hh + b.hh + (a.dummy || b.dummy ? 22 : 44);
+  function placeColumn(col, desired) {
+    const off = [0];
+    for (let i = 1; i < col.length; i++) off[i] = off[i - 1] + sepOf(col[i - 1], col[i]);
+    const blocks = [];
+    col.forEach((n, i) => {
+      blocks.push({ sum: desired[i] - off[i], cnt: 1, from: i });
+      while (blocks.length > 1) {
+        const b = blocks[blocks.length - 1], a = blocks[blocks.length - 2];
+        if (a.sum / a.cnt <= b.sum / b.cnt) break;
+        a.sum += b.sum; a.cnt += b.cnt; blocks.pop();
+      }
+    });
+    blocks.forEach(b => { for (let k = 0; k < b.cnt; k++) col[b.from + k].y = b.sum / b.cnt + off[b.from + k]; });
+  }
+  function placeVertically(cols, preds, succs) {
+    cols.forEach(c => c.forEach((n, i) => { n.y = i * 120; }));
+    for (let it = 0; it < 14; it++) {
+      const ls = it % 2 === 0 ? d3.range(cols.length) : d3.range(cols.length - 1, -1, -1);
+      ls.forEach(l => {
+        const des = cols[l].map(n => {
+          const nb = (it % 2 === 0 ? preds.get(n) : succs.get(n));
+          const both = nb.length ? nb : preds.get(n).concat(succs.get(n));
+          return both.length ? d3.mean(both, m => m.y) : n.y;
+        });
+        placeColumn(cols[l], des);
+      });
+    }
+    const minY = d3.min(cols.flat(), n => n.y - n.hh);
+    cols.flat().forEach(n => { n.y += TOP - minY; });
+  }
+
+  // ------------------------------------------------------------------ build
+  let W = 1200, H = 520, L = 0, cols = [];
+  if (!empty) {
+    L = assignLayers();
+    addDummies();
+    const o = orderLayers(L);
+    cols = o.cols;
+    placeVertically(cols, o.preds, o.succs);
+    W = Math.max(1200, L * SPACING + CARD_W + 2 * MARGIN);
+    const x0 = (W - L * SPACING) / 2;
+    nodes.concat(dummies).forEach(n => { n.x = x0 + n.layer * SPACING; });
+    H = Math.max(440, d3.max(cols.flat(), n => n.y + n.hh) + 150);
+  }
+
+  // ------------------------------------------------------------------ svg scaffold
+  const svg = d3.select("#graph").attr("viewBox", `0 0 ${W} ${H}`)
+    .attr("preserveAspectRatio", "xMidYMid meet").attr("font-family", FONT);
+  svg.append("style").text(`
+    .card-name { font-size: 16px; font-weight: 600; fill: #0f172a; }
+    .card-tag  { font-size: 10.5px; font-weight: 700; letter-spacing: .09em; }
+    .sev       { font-size: 10px; font-weight: 800; letter-spacing: .07em; }
+    .elabel    { font-size: 13.5px; font-weight: 500; fill: #334155; }
+    .title     { font-size: 27px; font-weight: 700; fill: #0f172a; }
+    .subtitle  { font-size: 14.5px; fill: #64748b; }
+    .hint      { font-size: 12px; fill: #94a3b8; }
+    .legend-t  { font-size: 13.5px; fill: #334155; }
+    .node { cursor: grab; }
+    .dim { opacity: .14; }
+    .edge-hit { cursor: help; }
+  `);
+  const defs = svg.append("defs");
+  [["arrow", "#64748b"], ["arrow-red", "#dc2626"]].forEach(([id, c]) => {
+    defs.append("marker").attr("id", id).attr("viewBox", "0 0 10 10").attr("refX", 9).attr("refY", 5)
+      .attr("markerWidth", 9).attr("markerHeight", 9).attr("markerUnits", "userSpaceOnUse")
+      .attr("orient", "auto").append("path").attr("d", "M0,0 L10,5 L0,10 z").attr("fill", c);
+  });
+  const sh = defs.append("filter").attr("id", "shadow").attr("x", "-10%").attr("y", "-20%").attr("width", "120%").attr("height", "150%");
+  sh.append("feDropShadow").attr("dx", 0).attr("dy", 2).attr("stdDeviation", 3).attr("flood-color", "#0f172a").attr("flood-opacity", 0.14);
+
+  svg.append("rect").attr("class", "bg").attr("width", W).attr("height", H).attr("fill", "#ffffff");
+  svg.append("text").attr("class", "title").attr("x", W / 2).attr("y", 54).attr("text-anchor", "middle").text(DATA.title);
+  svg.append("text").attr("class", "subtitle").attr("x", W / 2).attr("y", 82).attr("text-anchor", "middle").text(DATA.subtitle);
+
+  const root = svg.append("g").attr("class", "viewport");
+  const gEdges = root.append("g"), gHit = root.append("g"), gNodes = root.append("g"), gLabels = root.append("g");
+
+  // ---- icons (24x24 grid, drawn white)
+  const ICONS = {
+    user:  g => { g.append("circle").attr("cx", 12).attr("cy", 8).attr("r", 4);
+                  g.append("path").attr("d", "M4,21 C4,15.5 8,14 12,14 C16,14 20,15.5 20,21 z"); },
+    group: g => { g.append("circle").attr("cx", 8.5).attr("cy", 8.5).attr("r", 3.4);
+                  g.append("circle").attr("cx", 16.5).attr("cy", 9).attr("r", 2.9).attr("opacity", .85);
+                  g.append("path").attr("d", "M1.5,20 C1.5,15.5 5,14 8.5,14 C12,14 15.5,15.5 15.5,20 z");
+                  g.append("path").attr("d", "M15.8,14.3 C19.5,14.1 22.5,15.5 22.5,19.5 L17.2,19.5 C17.2,17.5 16.8,15.8 15.8,14.3 z").attr("opacity", .85); },
+    sa:    g => { g.append("rect").attr("x", 6).attr("y", 6).attr("width", 12).attr("height", 12).attr("rx", 2.5);
+                  [8.5, 12, 15.5].forEach(p => {
+                    g.append("rect").attr("x", p - .7).attr("y", 2.8).attr("width", 1.4).attr("height", 3).attr("fill", "#fff").attr("stroke", "none");
+                    g.append("rect").attr("x", p - .7).attr("y", 18).attr("width", 1.4).attr("height", 3).attr("fill", "#fff").attr("stroke", "none");
+                    g.append("rect").attr("x", 2.8).attr("y", p - .7).attr("width", 3).attr("height", 1.4).attr("fill", "#fff").attr("stroke", "none");
+                    g.append("rect").attr("x", 18).attr("y", p - .7).attr("width", 3).attr("height", 1.4).attr("fill", "#fff").attr("stroke", "none");
+                  });
+                  g.append("rect").attr("x", 9.3).attr("y", 9.3).attr("width", 5.4).attr("height", 5.4).attr("rx", 1).attr("class", "chipcore"); },
+    noderoot: g => { [3.5, 10, 16.5].forEach(y => {
+                       g.append("rect").attr("x", 3).attr("y", y).attr("width", 18).attr("height", 4.6).attr("rx", 1.4);
+                       g.append("circle").attr("cx", 6.4).attr("cy", y + 2.3).attr("r", .95).attr("class", "chipcore");
+                     }); },
+    admin: g => { g.append("path").attr("d", "M12,2.5 L20,5.5 L20,11.5 C20,16.5 16.5,20 12,21.8 C7.5,20 4,16.5 4,11.5 L4,5.5 z");
+                  g.append("path").attr("d", "M8.4,12 L11,14.6 L16,9.4").attr("class", "chipcore stroke"); },
+    workload: g => { g.append("path").attr("d", "M12,2.5 L20.5,7 L20.5,17 L12,21.5 L3.5,17 L3.5,7 z");
+                  g.append("path").attr("d", "M3.8,7.2 L12,11.8 L20.2,7.2 M12,11.8 L12,21.2").attr("class", "chipcore stroke"); },
+    other: g => { g.append("circle").attr("cx", 12).attr("cy", 12).attr("r", 8); },
+  };
+  function drawIcon(g, type, T, cx, cy, r, scale) {
+    g.append("circle").attr("cx", cx).attr("cy", cy).attr("r", r).attr("fill", T.color);
+    const ig = g.append("g").attr("transform", `translate(${cx - 12 * scale},${cy - 12 * scale}) scale(${scale})`)
+      .attr("fill", "#fff").attr("stroke", "#fff").attr("stroke-width", 0);
+    (ICONS[type] || ICONS.other)(ig);
+    ig.selectAll(".chipcore").attr("fill", T.color).attr("stroke", T.color);
+    ig.selectAll(".stroke").attr("fill", "none").attr("stroke", T.color).attr("stroke-width", 2.2)
+      .attr("stroke-linecap", "round").attr("stroke-linejoin", "round");
+  }
+
+  // ---- tooltip
+  const tip = document.getElementById("tip");
+  const esc = s => String(s).replace(/[&<>"]/g, c => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;" }[c]));
+  function showTip(ev, html) {
+    tip.innerHTML = html; tip.style.display = "block";
+    const r = tip.getBoundingClientRect();
+    let x = ev.clientX + 18, y = ev.clientY + 18;
+    if (x + r.width > innerWidth - 8) x = ev.clientX - r.width - 18;
+    if (y + r.height > innerHeight - 8) y = ev.clientY - r.height - 18;
+    tip.style.left = Math.max(8, x) + "px"; tip.style.top = Math.max(8, y) + "px";
+  }
+  const hideTip = () => { tip.style.display = "none"; };
+
+  if (empty) { drawEmpty(); return; }
+
+  // ------------------------------------------------------------------ nodes
+  const node = gNodes.selectAll("g.node").data(nodes, d => d.id).join("g").attr("class", "node");
+  node.each(function (d) {
+    const g = d3.select(this), T = TYPES[d.type] || TYPES.other;
+    g.append("rect").attr("x", -CARD_W / 2).attr("y", -CARD_H / 2).attr("width", CARD_W).attr("height", CARD_H)
+      .attr("rx", 14).attr("fill", d.type === "admin" || d.type === "noderoot" ? T.tint : "#fff")
+      .attr("stroke", T.color).attr("stroke-width", d.type === "admin" ? 3 : 2).attr("filter", "url(#shadow)");
+    const ix = -CARD_W / 2 + 14 + ICON_R;
+    drawIcon(g, d.type, T, ix, 0, ICON_R, 0.95);
+    const tx = ix + ICON_R + 13;
+    g.append("text").attr("class", "card-tag").attr("x", tx).attr("y", -8).attr("fill", T.color).text(T.tag);
+    const nm = g.append("text").attr("class", "card-name").attr("x", tx).attr("y", 14).text(d.label);
+    d.truncated = false;
+    if (d.sev && SEV[d.sev]) {
+      const S = SEV[d.sev], w = d.sev.length * 7.4 + 14;
+      g.append("rect").attr("x", CARD_W / 2 - 12 - w).attr("y", -CARD_H / 2 + 9).attr("width", w).attr("height", 17).attr("rx", 8.5).attr("fill", S.bg);
+      g.append("text").attr("class", "sev").attr("x", CARD_W / 2 - 12 - w / 2).attr("y", -CARD_H / 2 + 21.3).attr("text-anchor", "middle").attr("fill", S.fg).text(d.sev.toUpperCase());
+    }
+    d._nm = nm;
+  });
+
+  function fitNames() {
+    const maxW = CARD_W / 2 - 14 - (-CARD_W / 2 + 14 + ICON_R * 2 + 13);
+    nodes.forEach(d => {
+      const t = d._nm; let s = d.label;
+      if (t.node().getComputedTextLength() > maxW) {
+        d.truncated = true;
+        while (s.length > 3 && t.node().getComputedTextLength() > maxW) { s = s.slice(0, -1); t.text(s + "\u2026"); }
+      }
+    });
+  }
+
+  node.on("mousemove", (ev, d) => {
+    const T = TYPES[d.type] || TYPES.other;
+    let h = `<div class="h">${esc(d.label)}</div><div>${T.tag.toLowerCase()}`;
+    if (d.sev) h += ` &middot; <b>${esc(d.sev)}</b> severity`;
+    h += `</div>`;
+    if (d.type === "admin") h += `<div class="k">Goal</div><div>${d.inCount} distinct step${d.inCount === 1 ? "" : "s"} end here.</div>`;
+    else if (d.type === "noderoot") h += `<div class="k">What it means</div><div>Root on a node: every projected ServiceAccount token of pods scheduled there is readable.</div>`;
+    else if (d.sev) h += `<div class="k">Path</div><div>${d.steps} step${d.steps === 1 ? "" : "s"} to cluster-admin.</div>`;
+    if (d.also && d.also.length) h += `<div class="k">Same chain also open to</div><div>${d.also.slice(0, 8).map(esc).join(", ")}${d.also.length > 8 ? `, +${d.also.length - 8} more` : ""}</div>`;
+    if (d.id !== d.label) h += `<div class="k">Identity</div><div><code>${esc(d.id)}</code></div>`;
+    showTip(ev, h);
+    highlight(d);
+  }).on("mouseleave", () => { hideTip(); highlight(null); });
+
+  // highlight everything reachable downstream of a node
+  function highlight(d) {
+    if (!d) { edge.classed("dim", false); node.classed("dim", false); label.classed("dim", false); return; }
+    const keepN = new Set([d]), keepE = new Set();
+    let grew = true;
+    while (grew) {
+      grew = false;
+      edges.forEach(e => { if (keepN.has(e.s) && !keepE.has(e)) { keepE.add(e); keepN.add(e.t); grew = true; } });
+    }
+    edge.classed("dim", e => !keepE.has(e)); label.classed("dim", e => !keepE.has(e)); node.classed("dim", n => !keepN.has(n));
+  }
+
+  // ------------------------------------------------------------------ edges
+  const edge = gEdges.selectAll("path").data(edges).join("path")
+    .attr("fill", "none").attr("stroke-linecap", "round")
+    .attr("stroke", e => e.t.type === "admin" ? "#dc2626" : "#64748b")
+    .attr("stroke-width", 2.4)
+    .attr("stroke-dasharray", e => e.confidence === "likely" ? "7 5" : e.confidence === "heuristic" ? "2 5" : null)
+    .attr("marker-end", e => e.t.type === "admin" ? "url(#arrow-red)" : "url(#arrow)");
+  const hit = gHit.selectAll("path").data(edges).join("path").attr("class", "edge-hit")
+    .attr("fill", "none").attr("stroke", "transparent").attr("stroke-width", 16);
+  const CONF = { certain: "certain", likely: "likely: rests on an assumption stated below", heuristic: "heuristic: verify by hand" };
+  hit.on("mousemove", (ev, e) => {
+    let h = `<div class="h">${esc(e.s.label)} &rarr; ${esc(e.t.label)}</div><div>${esc(e.action)}</div>`;
+    if (e.why) h += `<div class="k">Why it works</div><div>${esc(e.why)}</div>`;
+    if (e.grant) h += `<div class="k">Grant</div><div><code>${esc(e.grant)}</code></div>`;
+    h += `<div class="k">Confidence</div><div>${esc(CONF[e.confidence] || e.confidence)}</div>`;
+    if (e.fix) h += `<div class="k">Fix</div><div>${esc(e.fix)}</div>`;
+    showTip(ev, h);
+    edge.filter(x => x === e).attr("stroke-width", 4);
+  }).on("mouseleave", () => { hideTip(); edge.attr("stroke-width", 2.4); });
+
+  // ---- labels
+  const label = gLabels.selectAll("g").data(edges).join("g").attr("pointer-events", "none");
+  label.each(function (e) {
+    const g = d3.select(this);
+    const lines = e.shortLabel.split("\n");
+    const t = g.append("text").attr("class", "elabel").attr("text-anchor", "middle");
+    lines.forEach((ln, i) => t.append("tspan").attr("x", 0).attr("dy", i === 0 ? 0 : 17).text(ln));
+    e.lines = lines.length;
+    e._t = t; e._g = g;
+  });
+  function sizeLabels() {
+    edges.forEach(e => {
+      const bb = e._t.node().getBBox();
+      e.pw = Math.ceil(bb.width) + 22; e.ph = e.lines * 17 + 9;
+      e._g.insert("rect", "text").attr("x", -e.pw / 2).attr("y", -e.ph / 2).attr("width", e.pw).attr("height", e.ph)
+        .attr("rx", e.ph / 2 > 16 ? 12 : e.ph / 2).attr("fill", "#fff").attr("stroke", "#cbd5e1").attr("stroke-width", 1.2);
+      e._t.attr("y", -e.ph / 2 + 6 + 11);
+    });
+  }
+
+  // arrowheads and tails spread along a card side when several edges meet there
+  function slots() {
+    nodes.forEach(n => {
+      const inc = edges.filter(e => e.t === n).sort((p, q) => prevOf(p).y - prevOf(q).y);
+      const stp = inc.length > 1 ? Math.min(17, (CARD_H - 20) / (inc.length - 1)) : 0;
+      inc.forEach((e, i) => { e.inOff = (i - (inc.length - 1) / 2) * stp; });
+      const outg = edges.filter(e => e.s === n).sort((p, q) => nextOf(p).y - nextOf(q).y);
+      const so = outg.length > 1 ? Math.min(17, (CARD_H - 20) / (outg.length - 1)) : 0;
+      outg.forEach((e, i) => { e.outOff = (i - (outg.length - 1) / 2) * so; });
+    });
+  }
+  const prevOf = e => e.chain[e.chain.length - 2], nextOf = e => e.chain[1];
+  function pointsFor(e) {
+    const p = [{ x: e.s.x + CARD_W / 2, y: e.s.y + (e.outOff || 0) }];
+    e.chain.slice(1, -1).forEach(d => { p.push({ x: d.x - CARD_W / 2 - 8, y: d.y }, { x: d.x + CARD_W / 2 + 8, y: d.y }); });
+    p.push({ x: e.t.x - CARD_W / 2 - 4, y: e.t.y + (e.inOff || 0) });
+    return p;
+  }
+  const line = d3.line().x(p => p.x).y(p => p.y).curve(d3.curveBumpX);
+  function routeEdges() {
+    slots();
+    edge.attr("d", e => line(pointsFor(e)));
+    hit.attr("d", e => line(pointsFor(e)));
+  }
+
+  // choose a label spot per edge: clear of cards, other labels and other edges
+  const cardRects = () => nodes.map(n => ({ n, x0: n.x - CARD_W / 2, x1: n.x + CARD_W / 2, y0: n.y - CARD_H / 2, y1: n.y + CARD_H / 2 }));
+  const inRect = (r, x, y, pad) => x > r.x0 - pad && x < r.x1 + pad && y > r.y0 - pad && y < r.y1 + pad;
+  const overlap = (a, b) => a.x0 < b.x1 && a.x1 > b.x0 && a.y0 < b.y1 && a.y1 > b.y0;
+  const HINT = "Drag cards to rearrange \u00b7 scroll to zoom \u00b7 hover a card or an arrow for detail \u00b7 double-click to reset the view";
+  const hintEl = svg.append("text").attr("class", "hint");
+  let samples = [];
+  const CELL = 40;
+  function placeLabels() {
+    const paths = edge.nodes();
+    const grid = new Map();
+    samples = paths.map((p, i) => {
+      const len = p.getTotalLength(), a = [];
+      for (let s = 0; s <= len; s += 5) {
+        const q = p.getPointAtLength(s); a.push([q.x, q.y]);
+        const k = Math.floor(q.x / CELL) + "," + Math.floor(q.y / CELL);
+        (grid.get(k) || grid.set(k, []).get(k)).push([i, q.x, q.y]);
+      }
+      return { len, pts: a };
+    });
+    const crossing = (r, self) => {
+      let c = 0;
+      for (let gx = Math.floor(r.x0 / CELL); gx <= Math.floor(r.x1 / CELL); gx++)
+        for (let gy = Math.floor(r.y0 / CELL); gy <= Math.floor(r.y1 / CELL); gy++)
+          (grid.get(gx + "," + gy) || []).forEach(([j, x, y]) => { if (j !== self && x > r.x0 && x < r.x1 && y > r.y0 && y < r.y1) c++; });
+      return c;
+    };
+    const cards = cardRects(), placed = [];
+    const order = edges.map((e, i) => i).sort((a, b) => samples[a].len - samples[b].len);
+    order.forEach(i => {
+      const e = edges[i], p = paths[i], len = samples[i].len;
+      let best = null;
+      for (let u = 0.08; u <= 0.9; u += 0.01) {
+        const q = p.getPointAtLength(len * u);
+        const r = { x0: q.x - e.pw / 2 - 5, x1: q.x + e.pw / 2 + 5, y0: q.y - e.ph / 2 - 4, y1: q.y + e.ph / 2 + 4 };
+        let pen = Math.abs(u - 0.5) * 8;
+        if (cards.some(c => overlap(r, c))) pen += 5000;
+        placed.forEach(o => { if (overlap(r, o.r)) pen += 1000; });
+        if (pen < 1000) pen += crossing(r, i) * 6;
+        if (!best || pen < best.pen) best = { pen, u, q, r };
+        if (pen < 1) break;
+      }
+      e.u = best.u;
+      e.hidden = best.pen >= 1000;           // no clean spot in a dense graph: hover the arrow instead
+      if (!e.hidden) placed.push({ r: best.r });
+      e._g.attr("transform", `translate(${best.q.x},${best.q.y})`).attr("display", e.hidden ? "none" : null);
+    });
+    const nh = edges.filter(e => e.hidden).length;
+    hintEl.text(HINT + (nh ? ` \u00b7 ${nh} label${nh > 1 ? "s" : ""} hidden to avoid overlap, hover those arrows` : ""));
+  }
+  function moveLabels() {
+    const paths = edge.nodes();
+    edges.forEach((e, i) => { if (e.hidden) return; const q = paths[i].getPointAtLength(paths[i].getTotalLength() * e.u); e._g.attr("transform", `translate(${q.x},${q.y})`); });
+  }
+
+  function layout(full) {
+    node.attr("transform", d => `translate(${d.x},${d.y})`);
+    routeEdges();
+    if (full) placeLabels(); else moveLabels();
+  }
+
+  // ------------------------------------------------------------------ self-check (used by the test harness)
+  function check() {
+    const issues = [], cards = cardRects(), paths = edge.nodes();
+    edges.forEach((e, i) => {
+      if (e.hidden) return;
+      const m = e._g.node().transform.baseVal[0].matrix;
+      const lr = { x0: m.e - e.pw / 2, x1: m.e + e.pw / 2, y0: m.f - e.ph / 2, y1: m.f + e.ph / 2 };
+      cards.forEach(c => { if (overlap(lr, c)) issues.push(`label[${e.shortLabel}] x card[${c.n.label}]`); });
+      edges.forEach((o, j) => { if (j > i && !o.hidden) { const m2 = o._g.node().transform.baseVal[0].matrix;
+        if (overlap(lr, { x0: m2.e - o.pw / 2, x1: m2.e + o.pw / 2, y0: m2.f - o.ph / 2, y1: m2.f + o.ph / 2 })) issues.push(`label[${e.shortLabel}] x label[${o.shortLabel}]`); } });
+      cards.forEach(c => {
+        if (c.n === e.s || c.n === e.t) return;
+        if (samples[i].pts.some(q => inRect(c, q[0], q[1], 3))) issues.push(`edge[${e.s.label}>${e.t.label}] x card[${c.n.label}]`);
+      });
+    });
+    // two cards overlapping
+    for (let i = 0; i < cards.length; i++) for (let j = i + 1; j < cards.length; j++) if (overlap(cards[i], cards[j])) issues.push(`card[${cards[i].n.label}] x card[${cards[j].n.label}]`);
+    window.__issues = issues;
+  }
+
+  // ------------------------------------------------------------------ legend
+  function legend() {
+    const lg = svg.append("g").attr("class", "legend");
+    const lgBg = lg.append("rect").attr("rx", 14).attr("fill", "#f8fafc").attr("stroke", "#e2e8f0");
+    const used = new Set(nodes.map(n => n.type));
+    const names = { group: "Group", user: "User", sa: "Service account", workload: "Workload", noderoot: "Root on a node", admin: "Cluster-admin", other: "Other identity" };
+    const items = ["group", "user", "sa", "workload", "noderoot", "admin", "other"].filter(k => used.has(k)).map(k => [k, names[k]]);
+    let x = 0;
+    const addText = (txt, px) => { const t = lg.append("text").attr("class", "legend-t").attr("x", px).attr("y", 5).text(txt); return t.node().getBBox().width; };
+    items.forEach(([k, txt]) => {
+      const T = TYPES[k];
+      lg.append("rect").attr("x", x).attr("y", -9).attr("width", 26).attr("height", 18).attr("rx", 5)
+        .attr("fill", k === "admin" || k === "noderoot" ? T.tint : "#fff").attr("stroke", T.color).attr("stroke-width", 2);
+      lg.append("circle").attr("cx", x + 8).attr("cy", 0).attr("r", 3.8).attr("fill", T.color);
+      x += 26 + 8 + addText(txt, x + 34) + 34;
+    });
+    const confs = new Set(edges.map(e => e.confidence));
+    [[null, "certain hop", "certain"], ["7 5", "likely hop (rests on an assumption)", "likely"], ["2 5", "heuristic hop (verify)", "heuristic"]]
+      .filter(([, , k]) => k === "certain" ? confs.has("certain") || confs.size === 0 : confs.has(k)).forEach(([dash, txt]) => {
+        lg.append("line").attr("x1", x).attr("x2", x + 40).attr("y1", 0).attr("y2", 0).attr("stroke", "#64748b").attr("stroke-width", 2.4)
+          .attr("stroke-dasharray", dash).attr("stroke-linecap", "round");
+        x += 40 + 8 + addText(txt, x + 48) + 34;
+      });
+    const lw = x - 34;
+    lg.selectAll("*:not(rect:first-child)").attr("transform", `translate(${-lw / 2},0)`);
+    lgBg.attr("x", -lw / 2 - 26).attr("y", -26).attr("width", lw + 52).attr("height", 52);
+    lg.attr("transform", `translate(${W / 2},${H - 76})`);
+    hintEl.attr("x", W / 2).attr("y", H - 22).attr("text-anchor", "middle");
+  }
+
+  // ------------------------------------------------------------------ interaction
+  node.call(d3.drag()
+    .on("start", () => hideTip())
+    .on("drag", function (ev, d) { d.x = ev.x; d.y = ev.y; layout(false); })
+    .on("end", () => { layout(true); }));
+  const zoom = d3.zoom().scaleExtent([0.25, 4]).filter(ev => !ev.target.closest(".node") && ev.type !== "dblclick")
+    .on("zoom", ev => root.attr("transform", ev.transform));
+  svg.call(zoom).on("dblclick.reset", () => svg.transition().duration(300).call(zoom.transform, d3.zoomIdentity));
+
+  // ------------------------------------------------------------------ empty state
+  function drawEmpty() {
+    const T = TYPES.admin, g = svg.append("g").attr("transform", `translate(${W / 2},${H / 2 - 10})`);
+    g.append("rect").attr("x", -330).attr("y", -62).attr("width", 660).attr("height", 124).attr("rx", 18)
+      .attr("fill", "#f0fdf4").attr("stroke", "#16a34a").attr("stroke-width", 2).attr("filter", "url(#shadow)");
+    const ic = { color: "#16a34a" };
+    drawIcon(g, "admin", ic, -270, 0, 30, 1.35);
+    g.append("text").attr("x", -222).attr("y", -8).attr("font-size", 24).attr("font-weight", 700).attr("fill", "#14532d").text("No escalation path to cluster-admin found");
+    g.append("text").attr("x", -222).attr("y", 22).attr("font-size", 14.5).attr("fill", "#3f6212").text(DATA.emptyNote);
+    svg.append("text").attr("class", "hint").attr("x", W / 2).attr("y", H - 30).attr("text-anchor", "middle")
+      .text("Static analysis of the files given. Policy engines, kubelet reachability and cloud IAM are not modelled.");
+    window.__issues = []; window.__ready = true;
+  }
+
+  // ------------------------------------------------------------------ go
+  document.fonts.ready.then(() => {
+    fitNames(); sizeLabels(); layout(true); legend(); check(); window.__ready = true;
+  });
+})();
+</script>
+</body>
+</html>

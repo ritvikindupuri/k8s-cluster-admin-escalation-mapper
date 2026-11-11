@@ -38,9 +38,14 @@ python3 scripts/escalation_map.py dump/ --pods                       # also "if 
 python3 scripts/escalation_map.py dump/ --psa-exempt-ns kube-system,monitoring
 python3 scripts/escalation_map.py dump/ --json > paths.json
 python3 scripts/escalation_map.py dump/ --dot | dot -Tsvg > paths.svg
+python3 scripts/escalation_map.py dump/ --html paths.html           # interactive graph, one offline file
 ```
 
 Exit status: `0` no path at or above `--fail-on` (default `high`), `1` there is one, `2` bad input.
+
+## The interactive graph
+
+Whenever the run finds at least one path, also write the graph with `--html` (same command, add `--html paths.html`) and give the user the file path. Offer it by default; people read a graph faster than a hop list. The page is a single self-contained file (D3 is inlined), so it opens offline in any browser. It draws one card per identity, columns by number of steps with cluster-admin on the right, dashed arrows for `[likely]` hops, dotted for `[heuristic]` hops, and tooltips on every arrow with the grant, why it works and the fix. With zero paths it writes a "no path found" page. It needs `graph_template.html` and `d3.v7.min.js` next to `escalation_map.py`; keep the whole `scripts/` folder together. The page contains identity and grant names from the input, so treat it like the text report and do not post it anywhere public unless the user says to.
 
 ## What counts as a hop
 
