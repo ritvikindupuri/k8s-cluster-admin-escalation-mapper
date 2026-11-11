@@ -58,6 +58,22 @@ How a run flows, left to right:
 5. **Escalation graph.** The tool builds a graph of identities, grants, workloads and node-root capabilities, then searches it for the shortest route from each identity to cluster-admin.
 6. **Report.** You get each path hop by hop, a cut list, standing exposures, caveats, and an exit code. Steps 4 to 6 run on your machine against files only.
 
+## What the output looks like
+
+<p align="center">
+  <img src="assets/escalation-graph-primitives.png" alt="Figure 2: Escalation paths to cluster-admin (examples/primitives)" width="100%" />
+</p>
+
+Every arrow is one step an attacker can take, and every chain ends at cluster-admin (red). Dashed arrows are hops that rest on an assumption, such as a namespace with no Pod Security labels. Open `assets/graph/index.html` in a browser for the interactive version (drag nodes, scroll to zoom). A vector copy is at [`assets/escalation-graph-primitives.svg`](assets/escalation-graph-primitives.svg).
+
+To draw the graph for your own cluster:
+
+```bash
+python3 scripts/escalation_map.py your-rbac.yaml --json > out.json
+python3 assets/graph/to_d3.py out.json     # writes assets/graph/graph-data.js
+# then open assets/graph/index.html
+```
+
 ## Tech Stack
 
 | Layer | What is used |
@@ -69,7 +85,7 @@ How a run flows, left to right:
 | Output | Text, JSON, Graphviz DOT |
 | Agent integration | `SKILL.md` with YAML frontmatter, loaded by Claude Code and compatible agents |
 | Optional | Graphviz (`dot`) to render the DOT output |
-| Docs only | matplotlib to regenerate Figure 1 (`assets/build_diagram.py`) and Figure 2 (`assets/build_escalation_graph.py`); the Kubernetes logo is from the [kubernetes/kubernetes](https://github.com/kubernetes/kubernetes/tree/master/logo) repository |
+| Docs only | matplotlib to regenerate Figure 1 (`assets/build_diagram.py`); [D3.js](https://d3js.org) v7 (vendored in `assets/graph/`) and headless Chromium via Playwright (`assets/graph/render.py`) to regenerate Figure 2; the Kubernetes logo is from the [kubernetes/kubernetes](https://github.com/kubernetes/kubernetes/tree/master/logo) repository |
 
 ## Setup Instructions
 
@@ -264,13 +280,7 @@ Summary: 5 distinct path(s); 0 critical, 5 high, 0 medium
 
 The identity in the restricted namespace has no path. CSR create+approve is a standing exposure, not a path, because Kubernetes 1.22+ rejects `O=system:masters` on the kube-apiserver-client signer. The aggregated-role exposure is the kind of thing a per-role review never shows: every holder of `edit` inherits secret access without anyone editing a binding. Exit code `1`.
 
-<p align="center">
-  <img src="assets/escalation-graph-primitives.png" alt="Figure 2: Escalation paths found in examples/primitives" width="100%" />
-  <br />
-  <em>Figure 2: Escalation paths found in examples/primitives</em>
-</p>
-
-The picture is drawn from the tool's `--dot` output for this fixture.
+The graph for this fixture is Figure 2, under [What the output looks like](#what-the-output-looks-like).
 
 #### 4. `anonymous-tokens`: open to everyone
 
@@ -364,6 +374,7 @@ SKILL.md                      agent skill definition
 scripts/escalation_map.py     the tool
 examples/                     inert fixtures and expected output
 assets/                       Figures 1 and 2, their build scripts, and the Kubernetes logo
+assets/graph/                 D3.js graph page, JSON-to-graph converter, and renderer
 TESTING.md                    live-cluster and fixture results
 ```
 

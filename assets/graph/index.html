@@ -1,0 +1,268 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>Escalation paths to cluster-admin</title>
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<style>
+  html, body { margin: 0; background: #fff; }
+  #wrap { width: 100vw; height: 100vh; }
+  svg { display: block; width: 100%; height: 100%; cursor: grab; }
+  svg:active { cursor: grabbing; }
+</style>
+</head>
+<body>
+<div id="wrap"><svg id="graph" xmlns="http://www.w3.org/2000/svg"></svg></div>
+<script src="d3.v7.min.js"></script>
+<script src="graph-data.js"></script>
+<script>
+(function () {
+  const DATA = window.GRAPH_DATA;
+  const W = 1700, H = 800;
+  const CARD_W = 264, CARD_H = 66, ICON_R = 21;
+  const FONT = "Inter, 'Helvetica Neue', Helvetica, Arial, sans-serif";
+
+  const TYPES = {
+    group:    { color: "#2563eb", tint: "#eff6ff", tag: "GROUP" },
+    user:     { color: "#7c3aed", tint: "#f5f3ff", tag: "USER" },
+    sa:       { color: "#0d9488", tint: "#f0fdfa", tag: "SERVICE ACCOUNT" },
+    noderoot: { color: "#d97706", tint: "#fffbeb", tag: "HOST PRIVILEGE" },
+    admin:    { color: "#dc2626", tint: "#fef2f2", tag: "GOAL" },
+  };
+
+  // ---- layered layout: x by layer, y by barycenter of predecessors ----
+  const nodes = DATA.nodes.map(d => ({ ...d }));
+  const byId = new Map(nodes.map(d => [d.id, d]));
+  const edges = DATA.edges.map(e => ({ ...e, s: byId.get(e.source), t: byId.get(e.target) }));
+  const L = d3.max(nodes, d => d.layer);
+  const xs = L === 3 ? [155, 620, 1050, 1535]   // tuned spacing for the 4-layer primitives fixture
+    : d3.range(L + 1).map(l => 155 + (1535 - 155) * l / Math.max(1, L));
+  const xAt = l => xs[l];
+  const TOP = 190, GAP = 118;
+
+  const l0 = nodes.filter(d => d.layer === 0)
+    .sort((a, b) => b.depth - a.depth || a.label.localeCompare(b.label));
+  l0.forEach((d, i) => { d.y = TOP + i * GAP; });
+  for (let l = 1; l <= L; l++) {
+    const col = nodes.filter(d => d.layer === l);
+    col.forEach(d => {
+      const preds = edges.filter(e => e.t === d).map(e => e.s.y);
+      d.y = d3.mean(preds);
+    });
+    col.sort((a, b) => a.y - b.y);
+    for (let i = 1; i < col.length; i++) col[i].y = Math.max(col[i].y, col[i - 1].y + GAP);
+  }
+  nodes.forEach(d => { d.x = xAt(d.layer); });
+
+  // ---- svg scaffold ----
+  const svg = d3.select("#graph").attr("viewBox", `0 0 ${W} ${H}`)
+    .attr("preserveAspectRatio", "xMidYMid meet").attr("font-family", FONT);
+  svg.append("style").text(`
+    .card-name { font-size: 18px; font-weight: 600; fill: #0f172a; }
+    .card-tag  { font-size: 10.5px; font-weight: 700; letter-spacing: .09em; }
+    .elabel    { font-size: 13.5px; font-weight: 500; fill: #334155; }
+    .title     { font-size: 27px; font-weight: 700; fill: #0f172a; }
+    .subtitle  { font-size: 14.5px; fill: #64748b; }
+    .legend-t  { font-size: 13.5px; fill: #334155; }
+    .node { cursor: grab; }
+  `);
+  const defs = svg.append("defs");
+  [["arrow", "#64748b"], ["arrow-red", "#dc2626"]].forEach(([id, c]) => {
+    defs.append("marker").attr("id", id).attr("viewBox", "0 0 10 10").attr("refX", 9).attr("refY", 5)
+      .attr("markerWidth", 9).attr("markerHeight", 9).attr("markerUnits", "userSpaceOnUse")
+      .attr("orient", "auto").append("path").attr("d", "M0,0 L10,5 L0,10 z").attr("fill", c);
+  });
+  const sh = defs.append("filter").attr("id", "shadow").attr("x", "-10%").attr("y", "-20%").attr("width", "120%").attr("height", "150%");
+  sh.append("feDropShadow").attr("dx", 0).attr("dy", 2).attr("stdDeviation", 3).attr("flood-color", "#0f172a").attr("flood-opacity", 0.14);
+
+  svg.append("rect").attr("class", "bg").attr("width", W).attr("height", H).attr("fill", "#ffffff");
+  svg.append("text").attr("class", "title").attr("x", W / 2).attr("y", 54).attr("text-anchor", "middle").text(DATA.title);
+  const sum = DATA.summary || {};
+  svg.append("text").attr("class", "subtitle").attr("x", W / 2).attr("y", 82).attr("text-anchor", "middle")
+    .text(`${sum.paths || ""} paths found · every arrow is one step an attacker can take`);
+
+  const root = svg.append("g").attr("class", "viewport");
+  const gEdges = root.append("g");
+  const gNodes = root.append("g");
+  const gLabels = root.append("g");
+
+  // ---- icons (24x24 grid, drawn white) ----
+  const ICONS = {
+    user:  g => { g.append("circle").attr("cx", 12).attr("cy", 8).attr("r", 4);
+                  g.append("path").attr("d", "M4,21 C4,15.5 8,14 12,14 C16,14 20,15.5 20,21 z"); },
+    group: g => { g.append("circle").attr("cx", 8.5).attr("cy", 8.5).attr("r", 3.4);
+                  g.append("circle").attr("cx", 16.5).attr("cy", 9).attr("r", 2.9).attr("opacity", .85);
+                  g.append("path").attr("d", "M1.5,20 C1.5,15.5 5,14 8.5,14 C12,14 15.5,15.5 15.5,20 z");
+                  g.append("path").attr("d", "M15.8,14.3 C19.5,14.1 22.5,15.5 22.5,19.5 L17.2,19.5 C17.2,17.5 16.8,15.8 15.8,14.3 z").attr("opacity", .85); },
+    sa:    g => { g.append("rect").attr("x", 6).attr("y", 6).attr("width", 12).attr("height", 12).attr("rx", 2.5);
+                  [8.5, 12, 15.5].forEach(p => {
+                    g.append("rect").attr("x", p - .7).attr("y", 2.8).attr("width", 1.4).attr("height", 3).attr("fill", "#fff").attr("stroke", "none");
+                    g.append("rect").attr("x", p - .7).attr("y", 18).attr("width", 1.4).attr("height", 3).attr("fill", "#fff").attr("stroke", "none");
+                    g.append("rect").attr("x", 2.8).attr("y", p - .7).attr("width", 3).attr("height", 1.4).attr("fill", "#fff").attr("stroke", "none");
+                    g.append("rect").attr("x", 18).attr("y", p - .7).attr("width", 3).attr("height", 1.4).attr("fill", "#fff").attr("stroke", "none");
+                  });
+                  g.append("rect").attr("x", 9.3).attr("y", 9.3).attr("width", 5.4).attr("height", 5.4).attr("rx", 1).attr("class", "chipcore"); },
+    noderoot: g => { [3.5, 10, 16.5].forEach((y, i) => {
+                       g.append("rect").attr("x", 3).attr("y", y).attr("width", 18).attr("height", 4.6).attr("rx", 1.4);
+                       g.append("circle").attr("cx", 6.4).attr("cy", y + 2.3).attr("r", .95).attr("class", "chipcore");
+                     }); },
+    admin: g => { g.append("path").attr("d", "M12,2.5 L20,5.5 L20,11.5 C20,16.5 16.5,20 12,21.8 C7.5,20 4,16.5 4,11.5 L4,5.5 z");
+                  g.append("path").attr("d", "M8.4,12 L11,14.6 L16,9.4").attr("class", "chipcore stroke"); },
+  };
+
+  // ---- nodes ----
+  const node = gNodes.selectAll("g.node").data(nodes, d => d.id).join("g").attr("class", "node");
+  node.each(function (d) {
+    const g = d3.select(this), T = TYPES[d.type] || TYPES.sa;
+    g.append("rect").attr("x", -CARD_W / 2).attr("y", -CARD_H / 2).attr("width", CARD_W).attr("height", CARD_H)
+      .attr("rx", 14).attr("fill", d.type === "admin" || d.type === "noderoot" ? T.tint : "#fff")
+      .attr("stroke", T.color).attr("stroke-width", d.type === "admin" ? 3 : 2).attr("filter", "url(#shadow)");
+    const ix = -CARD_W / 2 + 14 + ICON_R;
+    g.append("circle").attr("cx", ix).attr("cy", 0).attr("r", ICON_R).attr("fill", T.color);
+    const ig = g.append("g").attr("transform", `translate(${ix - 12 * 0.95},${-12 * 0.95}) scale(0.95)`)
+      .attr("fill", "#fff").attr("stroke", "#fff").attr("stroke-width", 0);
+    ICONS[d.type] && ICONS[d.type](ig);
+    ig.selectAll(".chipcore").attr("fill", T.color).attr("stroke", T.color);
+    ig.selectAll(".stroke").attr("fill", "none").attr("stroke", T.color).attr("stroke-width", 2.2)
+      .attr("stroke-linecap", "round").attr("stroke-linejoin", "round");
+    const tx = ix + ICON_R + 13;
+    g.append("text").attr("class", "card-tag").attr("x", tx).attr("y", -8).attr("fill", T.color).text(T.tag);
+    g.append("text").attr("class", "card-name").attr("x", tx).attr("y", 14).text(d.label);
+  });
+
+  // ---- edges ----
+  // spread arrowheads along a card's left side when several edges arrive
+  function slots() {
+    nodes.forEach(n => {
+      const inc = edges.filter(e => e.t === n).sort((p, q) => p.s.y - q.s.y);
+      inc.forEach((e, i) => { e.inOff = (i - (inc.length - 1) / 2) * 17; });
+    });
+  }
+  const anchorOut = d => ({ x: d.x + CARD_W / 2, y: d.y });
+  const anchorIn = (d, e) => ({ x: d.x - CARD_W / 2 - 4, y: d.y + (e.inOff || 0) });
+  function pathFor(e) {
+    slots();
+    const a = anchorOut(e.s), b = anchorIn(e.t, e);
+    const dx = Math.max(60, (b.x - a.x) * 0.5);
+    return `M${a.x},${a.y} C${a.x + dx},${a.y} ${b.x - dx},${b.y} ${b.x},${b.y}`;
+  }
+  const edge = gEdges.selectAll("path").data(edges).join("path")
+    .attr("fill", "none").attr("stroke-linecap", "round")
+    .attr("stroke", e => e.t.type === "admin" ? "#dc2626" : "#64748b")
+    .attr("stroke-width", 2.4)
+    .attr("stroke-dasharray", e => e.confidence === "likely" ? "7 5" : null)
+    .attr("marker-end", e => e.t.type === "admin" ? "url(#arrow-red)" : "url(#arrow)");
+
+  // ---- edge labels: white pills, centred on the curve, offset above it ----
+  const label = gLabels.selectAll("g").data(edges).join("g");
+  label.each(function (e) {
+    const g = d3.select(this);
+    const lines = e.label.split("\n");
+    const t = g.append("text").attr("class", "elabel").attr("text-anchor", "middle");
+    lines.forEach((ln, i) => t.append("tspan").attr("x", 0).attr("dy", i === 0 ? 0 : 17).text(ln));
+    const bb = t.node().getBBox();
+    e.pw = Math.ceil(bb.width) + 22; e.ph = lines.length * 17 + 9;
+    g.insert("rect", "text").attr("x", -e.pw / 2).attr("y", -e.ph / 2).attr("width", e.pw).attr("height", e.ph)
+      .attr("rx", e.ph / 2 > 16 ? 12 : e.ph / 2).attr("fill", "#fff").attr("stroke", "#cbd5e1").attr("stroke-width", 1.2);
+    t.attr("y", -e.ph / 2 + 6 + 11);
+  });
+
+  function layout() {
+    node.attr("transform", d => `translate(${d.x},${d.y})`);
+    edge.attr("d", pathFor);
+    edge.each(function (e) {
+      const p = this, len = p.getTotalLength();
+      const m = p.getPointAtLength(len * (e.t.type === "admin" && e.s.layer === 0 ? 0.42 : 0.5));
+      const m2 = p.getPointAtLength(Math.min(len, len * 0.5 + 2)), m1 = p.getPointAtLength(len * 0.5 - 2);
+      e.lx = m.x; e.ly = m.y;
+    });
+    label.attr("transform", e => `translate(${e.lx},${e.ly})`);
+  }
+  layout();
+
+  // ---- overlap self-check (rects vs nodes, labels, and every edge polyline) ----
+  function check() {
+    const rects = e => ({ x0: e.lx - e.pw / 2, x1: e.lx + e.pw / 2, y0: e.ly - e.ph / 2, y1: e.ly + e.ph / 2 });
+    const hit = (r, x, y, pad) => x > r.x0 - pad && x < r.x1 + pad && y > r.y0 - pad && y < r.y1 + pad;
+    const issues = [];
+    edges.forEach((e, i) => {
+      const r = rects(e);
+      nodes.forEach(n => {
+        const nr = { x0: n.x - CARD_W / 2, x1: n.x + CARD_W / 2, y0: n.y - CARD_H / 2, y1: n.y + CARD_H / 2 };
+        if (r.x0 < nr.x1 && r.x1 > nr.x0 && r.y0 < nr.y1 && r.y1 > nr.y0) issues.push(`label[${e.label}] x node[${n.label}]`);
+      });
+      edges.forEach((o, j) => {
+        if (i === j) return;
+        const r2 = rects(o);
+        if (r.x0 < r2.x1 && r.x1 > r2.x0 && r.y0 < r2.y1 && r.y1 > r2.y0) issues.push(`label[${e.label}] x label[${o.label}]`);
+      });
+    });
+    const nodesEls = edge.nodes();
+    edges.forEach((e, i) => {
+      const r = rects(e);
+      nodesEls.forEach((p, j) => {
+        const len = p.getTotalLength();
+        for (let s = 0; s <= len; s += 3) {
+          const q = p.getPointAtLength(s);
+          if (hit(r, q.x, q.y, 3)) { if (i !== j) issues.push(`label[${e.label}] x edge[${edges[j].label}]`); break; }
+        }
+      });
+    });
+    // edge passing through a card it does not start or end at
+    edges.forEach((e, i) => {
+      const p = nodesEls[i], len = p.getTotalLength();
+      nodes.forEach(n => {
+        if (n === e.s || n === e.t) return;
+        const nr = { x0: n.x - CARD_W / 2, x1: n.x + CARD_W / 2, y0: n.y - CARD_H / 2, y1: n.y + CARD_H / 2 };
+        for (let s = 0; s <= len; s += 3) {
+          const q = p.getPointAtLength(s);
+          if (hit(nr, q.x, q.y, 4)) { issues.push(`edge[${e.label}] x node[${n.label}]`); break; }
+        }
+      });
+    });
+    // edge/edge crossings
+    const polys = nodesEls.map(p => { const len = p.getTotalLength(), a = []; for (let s = 0; s <= len; s += 4) { const q = p.getPointAtLength(s); a.push([q.x, q.y]); } return a; });
+    const seg = (a, b, c, d) => { const o = (p, q, r) => (q[0]-p[0])*(r[1]-p[1]) - (q[1]-p[1])*(r[0]-p[0]);
+      return o(a,b,c)*o(a,b,d) < 0 && o(c,d,a)*o(c,d,b) < 0; };
+    for (let i = 0; i < polys.length; i++) for (let j = i + 1; j < polys.length; j++) {
+      let c = 0;
+      for (let a = 0; a < polys[i].length - 1; a++) for (let b = 0; b < polys[j].length - 1; b++)
+        if (seg(polys[i][a], polys[i][a+1], polys[j][b], polys[j][b+1])) c++;
+      if (c) issues.push(`edge[${edges[i].label}] crosses edge[${edges[j].label}]`);
+    }
+    window.__issues = issues;
+    console.log("OVERLAP-CHECK: " + (issues.length ? issues.join(" | ") : "none"));
+  }
+
+  // ---- legend ----
+  const lg = svg.append("g").attr("class", "legend");
+  const lgBg = lg.append("rect").attr("rx", 14).attr("fill", "#f8fafc").attr("stroke", "#e2e8f0");
+  const items = [["group", "Group"], ["user", "User"], ["sa", "Service account"], ["noderoot", "Root on a node"], ["admin", "Cluster-admin"]];
+  let x = 0;
+  const addText = (txt, px) => { const t = lg.append("text").attr("class", "legend-t").attr("x", px).attr("y", 5).text(txt); return t.node().getBBox().width; };
+  items.forEach(([k, txt]) => {
+    const T = TYPES[k];
+    lg.append("rect").attr("x", x).attr("y", -9).attr("width", 26).attr("height", 18).attr("rx", 5)
+      .attr("fill", k === "admin" || k === "noderoot" ? T.tint : "#fff").attr("stroke", T.color).attr("stroke-width", 2);
+    lg.append("circle").attr("cx", x + 8).attr("cy", 0).attr("r", 3.8).attr("fill", T.color);
+    x += 26 + 8 + addText(txt, x + 34) + 34;
+  });
+  [[null, "certain hop"], ["7 5", "likely hop (rests on an assumption)"]].forEach(([dash, txt]) => {
+    lg.append("line").attr("x1", x).attr("x2", x + 40).attr("y1", 0).attr("y2", 0).attr("stroke", "#64748b").attr("stroke-width", 2.4).attr("stroke-dasharray", dash);
+    x += 40 + 8 + addText(txt, x + 48) + 34;
+  });
+  const lw = x - 34;
+  lg.selectAll("*:not(rect:first-child)").attr("transform", `translate(${-lw / 2},0)`);
+  lgBg.attr("x", -lw / 2 - 26).attr("y", -26).attr("width", lw + 52).attr("height", 52);
+  lg.attr("transform", `translate(${W / 2},${H - 52})`);
+
+  // ---- interaction: drag nodes, zoom/pan ----
+  node.call(d3.drag().on("drag", function (ev, d) { d.x = ev.x; d.y = ev.y; layout(); }));
+  svg.call(d3.zoom().scaleExtent([0.4, 4]).filter(ev => !ev.target.closest(".node") && !(ev.type === "dblclick"))
+    .on("zoom", ev => root.attr("transform", ev.transform)));
+
+  document.fonts.ready.then(() => { layout(); check(); window.__ready = true; });
+})();
+</script>
+</body>
+</html>

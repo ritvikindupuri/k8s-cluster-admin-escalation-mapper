@@ -1,0 +1,133 @@
+window.GRAPH_DATA = {
+  "title": "Figure 2: Escalation paths to cluster-admin (examples/primitives)",
+  "nodes": [
+    {
+      "id": "Group:team-a-devs",
+      "label": "team-a-devs",
+      "type": "group",
+      "layer": 0,
+      "depth": 3
+    },
+    {
+      "id": "NODE_ROOT",
+      "label": "NODE ROOT",
+      "type": "noderoot",
+      "layer": 1,
+      "depth": 0
+    },
+    {
+      "id": "SA:ops/platform-admin",
+      "label": "ops/platform-admin",
+      "type": "sa",
+      "layer": 2,
+      "depth": 0
+    },
+    {
+      "id": "CLUSTER_ADMIN",
+      "label": "CLUSTER-ADMIN",
+      "type": "admin",
+      "layer": 3,
+      "depth": 0
+    },
+    {
+      "id": "SA:ci/policy-sync",
+      "label": "ci/policy-sync",
+      "type": "sa",
+      "layer": 0,
+      "depth": 1
+    },
+    {
+      "id": "SA:ci/rbac-sync",
+      "label": "ci/rbac-sync",
+      "type": "sa",
+      "layer": 0,
+      "depth": 1
+    },
+    {
+      "id": "SA:ci/release-bot",
+      "label": "ci/release-bot",
+      "type": "sa",
+      "layer": 0,
+      "depth": 1
+    },
+    {
+      "id": "User:dana@example.com",
+      "label": "dana@example.com",
+      "type": "user",
+      "layer": 0,
+      "depth": 2
+    }
+  ],
+  "edges": [
+    {
+      "source": "Group:team-a-devs",
+      "target": "NODE_ROOT",
+      "kind": "POD_CREATE",
+      "label": "create pod\n(no Pod Security)",
+      "confidence": "likely"
+    },
+    {
+      "source": "NODE_ROOT",
+      "target": "SA:ops/platform-admin",
+      "kind": "NODE_TOKENS",
+      "label": "steal SA token\non the node",
+      "confidence": "likely"
+    },
+    {
+      "source": "SA:ops/platform-admin",
+      "target": "CLUSTER_ADMIN",
+      "kind": "ADMIN",
+      "label": "already\ncluster-admin",
+      "confidence": "certain"
+    },
+    {
+      "source": "SA:ci/policy-sync",
+      "target": "CLUSTER_ADMIN",
+      "kind": "WEBHOOK",
+      "label": "mutating webhook",
+      "confidence": "likely"
+    },
+    {
+      "source": "SA:ci/rbac-sync",
+      "target": "CLUSTER_ADMIN",
+      "kind": "ESCALATE",
+      "label": "escalate on role",
+      "confidence": "certain"
+    },
+    {
+      "source": "SA:ci/release-bot",
+      "target": "CLUSTER_ADMIN",
+      "kind": "BIND",
+      "label": "bind cluster-admin",
+      "confidence": "certain"
+    },
+    {
+      "source": "User:dana@example.com",
+      "target": "SA:ops/platform-admin",
+      "kind": "IMPERSONATE",
+      "label": "impersonate",
+      "confidence": "certain"
+    }
+  ],
+  "summary": {
+    "paths": 5,
+    "admin_equivalent": [
+      "SA:ops/platform-admin",
+      "User:admin@example.com"
+    ],
+    "by_severity": {
+      "critical": 0,
+      "high": 5,
+      "medium": 0
+    },
+    "objects": {
+      "ClusterRoleBinding": 6,
+      "RoleBinding": 2,
+      "Namespace": 5,
+      "ServiceAccount": 1,
+      "Deployment": 1,
+      "ClusterRole": 7,
+      "Role": 2
+    }
+  }
+};
