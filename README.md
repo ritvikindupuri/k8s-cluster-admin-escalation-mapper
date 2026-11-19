@@ -23,15 +23,15 @@
 
 This is an open-source Claude skill, with a standalone Python CLI behind it, that maps chained RBAC paths from any Kubernetes identity to cluster-admin. Most RBAC checkers look at one role at a time and flag verbs like `*`, `secrets` or `pods/exec`. Real escalations are chains of grants that each look ordinary: a namespace admin writes a custom resource, the operator behind it can create Jobs in `kube-system`, and a Job there runs as a deploy bot that holds `*` on `*`. No single role in that chain is cluster-admin, so a per-role linter stays quiet.
 
-The tool puts roles, bindings, service accounts, namespaces and workloads into one graph and searches it. For every identity that is not already an admin, it prints the shortest chain to cluster-admin and explains each hop. It then lists the smallest set of grants to remove to break the most paths at once.
+The tool follows permission chains step by step across roles, bindings, service accounts, namespaces and workloads. For every identity that is not already an admin, it prints the shortest chain to cluster-admin and explains each hop. It then lists the smallest set of grants to remove to break the most paths at once.
 
 It is read-only and offline. It parses files you give it and never connects to a cluster. The skill (`SKILL.md`) and the CLI (`scripts/escalation_map.py`) share one engine, and the CLI needs nothing beyond Python's standard library.
 
 ## Key Features
 
 - **Chained hops.** Models bind and escalate, impersonation, pod and workload creation, `pods/exec`, attach and ephemeral containers, secret read and create, `serviceaccounts/token`, `nodes/proxy`, CSR approval, mutating webhooks, the EKS `aws-auth` ConfigMap, and workload-to-node escapes.
-- **Shortest path per identity.** Each path names the ClusterRole or Role and the binding behind every hop.
-- **Cut list.** A greedy cover picks the grant whose removal breaks the most paths, then repeats.
+- **Shortest chain per identity.** Each path names the ClusterRole or Role and the binding behind every hop.
+- **Cut list.** Starts with the grant whose removal breaks the most paths, then repeats on what is left.
 - **Standing exposures.** Dangerous grants that do not finish a path with the data given, such as validating webhook writes or aggregated roles that expose secrets.
 - **Real RBAC semantics.** Aggregated ClusterRoles are expanded, RoleBindings stay scoped to their namespace, `resourceNames` pins are respected, and group inheritance works.
 - **Confidence labels.** Hops that rest on an assumption are marked `[likely]`; the operator confused-deputy rule is marked `[heuristic]`.
@@ -52,7 +52,7 @@ How a run flows, left to right:
 2. **kubectl export.** You run `kubectl get ... -o yaml` with read access to those object types. Secret values are not needed and should not be exported.
 3. **Manifest files.** The result is one or more YAML or JSON files. Helm-rendered output and plain manifests from a Git repo work too, so you can check a change before it is applied.
 4. **Agent and skill.** The agent loads `SKILL.md`, which tells it when the tool applies and how to run and report it. Or you skip the agent and call the CLI directly.
-5. **Escalation graph.** The tool builds a graph of identities, grants, workloads and node-root capabilities, then searches it for the shortest route from each identity to cluster-admin.
+5. **Permission chains.** The tool follows permission chains step by step across identities, grants, workloads and node-root capabilities, and reports the shortest chain from each identity to cluster-admin.
 6. **Report.** You get each path hop by hop, a cut list, standing exposures, caveats, and an exit code. Steps 4 to 6 run on your machine against files only.
 
 ## Tech Stack
@@ -62,7 +62,7 @@ How a run flows, left to right:
 | Target platform | Kubernetes RBAC (rbac.authorization.k8s.io/v1), Pod Security Admission labels |
 | Input | `kubectl get -o yaml` or `-o json`, Helm-rendered manifests, plain YAML/JSON files |
 | Engine | Python 3.9 or newer, standard library only; a small built-in YAML loader, so PyYAML is not required |
-| Search | Directed graph with Dijkstra-style shortest paths and a greedy set cover for the cut list |
+| Search | Follows permission chains step by step, reports the shortest chain to cluster-admin, and lists the smallest set of grants to remove |
 | Output | Text, JSON, Graphviz DOT, self-contained interactive HTML |
 | Agent integration | `SKILL.md` with YAML frontmatter, loaded by Claude Code and compatible agents |
 | Graph page | [D3.js](https://d3js.org) v7, vendored as `scripts/d3.v7.min.js` and inlined into the `--html` file |
@@ -229,7 +229,7 @@ The cut list picks the grant that removes the most remaining paths, then repeats
 3. Run the tool again.
 4. Repeat until it reports no paths.
 
-Paths are shortest-path, not all-paths, so a second route through different grants can sit behind the one shown.
+The tool reports the shortest chain for each identity, not every possible chain, so a second route through different grants can sit behind the one shown.
 
 ### Step 8. Use it in CI
 
@@ -252,10 +252,10 @@ Check manifests in a pull request, before they reach a cluster:
 
 ### Limits
 
-- **Static analysis of what you give it.** A partial dump gives a partial graph.
+- **Static analysis of what you give it.** A partial dump only shows the chains visible in that data.
 - **Policy engines are not evaluated.** Kyverno, Gatekeeper and ValidatingAdmissionPolicy may already block a hop. The tool prints a note when it sees their objects.
 - **Not modelled:** kubelet reachability, whether the control plane is schedulable, cloud IAM, and in-cluster authenticators other than RBAC.
-- **Shortest path, not all paths.** Rerun after fixing.
+- **Shortest chain, not every chain.** Rerun after fixing.
 - **It cannot confirm a hop works**, only that RBAC permits it. Do not test hops on a cluster you do not own or are not authorized to test.
 
 The bundled fixtures in [`examples/`](examples/) are invented, inert YAML. Do not apply them to a cluster.

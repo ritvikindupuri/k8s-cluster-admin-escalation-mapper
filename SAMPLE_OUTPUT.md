@@ -203,7 +203,7 @@ Summary: 5 distinct path(s); 0 critical, 5 high, 0 medium
 
 Exit code `1`. The identity in the restricted namespace has no path. CSR create plus approve is an exposure, not a path, because Kubernetes 1.22 and later reject `O=system:masters` on the kube-apiserver-client signer. The aggregated-role exposure is the kind of thing a per-role review does not show: every holder of `edit` inherits secret access without anyone editing a binding.
 
-The graph for this fixture is [Figure 2](#figure-2-escalation-paths-to-cluster-admin) below.
+The diagram for this fixture is [Figure 2](#figure-2-escalation-paths-to-cluster-admin) below.
 
 ### `anonymous-tokens`
 
@@ -401,7 +401,7 @@ python3 scripts/escalation_map.py examples/primitives --html paths.html
 <p align="center">
   <img src="assets/html-output/html-synthetic-large.png" alt="Figure 5: The --html output for a larger invented cluster" width="100%" />
 </p>
-<p align="center"><em>Figure 5. A larger invented cluster: 10 paths, 15 nodes and up to 4 hops, with mixed identity types.</em></p>
+<p align="center"><em>Figure 5. A larger invented cluster: 10 paths, 15 identities and workloads, and up to 4 hops, with mixed identity types.</em></p>
 
 The page contains the identity and grant names from your input, so handle it the way you would handle the text report.
 
