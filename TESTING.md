@@ -28,7 +28,7 @@ Live-cluster validation, bundled fixtures, and the interactive HTML graph
 
 ## 1. Summary and scope
 
-The mapper reads Kubernetes RBAC and workload manifests and reports every chain of grants an identity could use to become cluster-admin. This report covers three things:
+The mapper reads Kubernetes RBAC and workload manifests and reports the shortest chain of grants each identity could use to become cluster-admin. This report covers three things:
 
 - **Live validation.** Does the mapper find known escalation paths on a real cluster, and stay quiet about accounts that are supposed to be safe?
 - **Bundled fixtures.** Do the five invented fixtures in `examples/` still produce their saved expected output?

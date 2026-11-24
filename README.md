@@ -23,13 +23,13 @@
 
 This is an open-source Claude skill, with a standalone Python CLI behind it, that maps chained RBAC paths from any Kubernetes identity to cluster-admin. Most RBAC checkers look at one role at a time and flag verbs like `*`, `secrets` or `pods/exec`. Real escalations are chains of grants that each look ordinary: a namespace admin writes a custom resource, the operator behind it can create Jobs in `kube-system`, and a Job there runs as a deploy bot that holds `*` on `*`. No single role in that chain is cluster-admin, so a per-role linter stays quiet.
 
-The tool follows permission chains step by step across roles, bindings, service accounts, namespaces and workloads. For every identity that is not already an admin, it prints the shortest chain to cluster-admin and explains each hop. It then lists the smallest set of grants to remove to break the most paths at once.
+The tool follows permission chains step by step across roles, bindings, service accounts, namespaces and workloads. For every identity that is not already an admin, it prints the shortest chain to cluster-admin and explains each hop. It then lists a small set of grants to remove to break the most paths at once (greedy algorithm).
 
 It is read-only and offline. It parses files you give it and never connects to a cluster. The skill (`SKILL.md`) and the CLI (`scripts/escalation_map.py`) share one engine, and the CLI needs nothing beyond Python's standard library.
 
 ## Key Features
 
-- **Chained hops.** Models bind and escalate, impersonation, pod and workload creation, `pods/exec`, attach and ephemeral containers, secret read and create, `serviceaccounts/token`, `nodes/proxy`, CSR approval, mutating webhooks, the EKS `aws-auth` ConfigMap, and workload-to-node escapes.
+- **Chained hops.** Models bind and escalate, impersonation, pod and workload creation, `pods/exec`, attach and ephemeral containers, secret read and create, `serviceaccounts/token`, `nodes/proxy`, mutating webhooks, the EKS `aws-auth` ConfigMap, and workload-to-node escapes. CSR create+approve is reported as a standing exposure (not a complete path on Kubernetes 1.22+).
 - **Shortest chain per identity.** Each path names the ClusterRole or Role and the binding behind every hop.
 - **Cut list.** Starts with the grant whose removal breaks the most paths, then repeats on what is left.
 - **Standing exposures.** Dangerous grants that do not finish a path with the data given, such as validating webhook writes or aggregated roles that expose secrets.
@@ -62,7 +62,7 @@ How a run flows, left to right:
 | Target platform | Kubernetes RBAC (rbac.authorization.k8s.io/v1), Pod Security Admission labels |
 | Input | `kubectl get -o yaml` or `-o json`, Helm-rendered manifests, plain YAML/JSON files |
 | Engine | Python 3.9 or newer, standard library only; a small built-in YAML loader, so PyYAML is not required |
-| Search | Follows permission chains step by step, reports the shortest chain to cluster-admin, and lists the smallest set of grants to remove |
+| Search | Follows permission chains step by step, reports the shortest chain to cluster-admin, and lists a small set of grants to remove (greedy) |
 | Output | Text, JSON, Graphviz DOT, self-contained interactive HTML |
 | Agent integration | `SKILL.md` with YAML frontmatter, loaded by Claude Code and compatible agents |
 | Graph page | [D3.js](https://d3js.org) v7, vendored as `scripts/d3.v7.min.js` and inlined into the `--html` file |
