@@ -9,7 +9,7 @@ Checkers tell you that a role is risky. This skill tells you where it leads.
 
 A namespace admin on a shared cluster is not cluster-admin. But if they can write the custom resources of an operator whose service account reads every Secret, and one of those Secrets holds a deploy bot's token, they are. That is a chain of three ordinary-looking grants. Linting each role on its own will not show it; you have to put the roles, bindings, service accounts and pods in one graph and search it.
 
-`scripts/escalation_map.py` does that. It reads RBAC and workload YAML (or JSON), builds the graph, and prints the shortest chain from each identity to cluster-admin with each hop explained, followed by the smallest set of grants whose removal breaks the most chains.
+`scripts/escalation_map.py` does that. It reads RBAC and workload YAML (or JSON), builds the graph, and prints the shortest chain from each identity to cluster-admin with each hop explained, followed by a small set of grants whose removal breaks the most chains (greedy algorithm).
 
 It is read-only and offline. It parses files you hand it and never talks to a cluster.
 
